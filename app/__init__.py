@@ -28,7 +28,8 @@ def _init_extensions(app: Flask) -> None:
     cors.init_app(
         app,
         resources={r"/api/*": {"origins": app.config["CORS_ORIGINS"]}},
-        supports_credentials=True,
+        supports_credentials=False,
+        methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
     )
 
 

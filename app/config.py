@@ -30,7 +30,7 @@ class Config:
     # Lista separada por vírgulas, ex.: "http://localhost:3000,https://app.exemplo.com"
     CORS_ORIGINS = [
         origin.strip()
-        for origin in os.getenv("CORS_ORIGINS", "http://localhost:3000").split(",")
+        for origin in os.getenv("CORS_ORIGINS", "https://poupefruti.vercel.app").split(",")
         if origin.strip()
     ]
 

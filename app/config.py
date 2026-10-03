@@ -20,7 +20,7 @@ class Config:
         "DATABASE_URL", "postgresql+psycopg://postgres:postgres@localhost:5432/poupefruti"
     )
     SQLALCHEMY_TRACK_MODIFICATIONS = False
-    SQLALCHEMY_ENGINE_OPTIONS = {"pool_pre_ping": True}
+    SQLALCHEMY_ENGINE_OPTIONS = {"pool_pre_ping": True, "pool_recycle": 300}
 
     # --- Segredos ---------------------------------------------------------
     SECRET_KEY = os.getenv("SECRET_KEY", "dev-secret-change-me")
@@ -56,9 +56,17 @@ class ProductionConfig(Config):
             raise RuntimeError("Defina JWT_SECRET_KEY antes de rodar em produção.")
 
 
+class TestingConfig(Config):
+    TESTING = True
+    SQLALCHEMY_DATABASE_URI = "sqlite:///:memory:"
+    SQLALCHEMY_ENGINE_OPTIONS = {}
+    WTF_CSRF_ENABLED = False
+
+
 CONFIG_MAP = {
     "development": DevelopmentConfig,
     "production": ProductionConfig,
+    "testing": TestingConfig,
     "default": DevelopmentConfig,
 }
 

@@ -3,6 +3,7 @@
 from flask import Blueprint, current_app, jsonify, request
 from flask_jwt_extended import (
     create_access_token,
+    get_jwt,
     get_jwt_identity,
     jwt_required,
 )
@@ -15,7 +16,7 @@ from ..validators import email_valido, normalizar_email
 auth_bp = Blueprint("auth", __name__, url_prefix="/api/v1/auth")
 
 
-def erro(code: str, message: str, status: int):
+def _erro(code: str, message: str, status: int):
     """Resposta de erro no formato padrão da API."""
     return jsonify({"error": {"code": code, "message": message}}), status
 
@@ -102,10 +103,10 @@ def login():
 def me():
     claims = get_jwt()
     if claims.get("role") == "admin":
-        return erro("forbidden", "Use o endpoint de admin para administradores."), 403
+        return _erro("forbidden", "Use o endpoint de admin para administradores.", 403)
 
     user = db.session.get(User, int(get_jwt_identity()))
     if user is None:
-        return erro("user_not_found", "Usuário não encontrado.", 404)
+        return _erro("user_not_found", "Usuário não encontrado.", 404)
 
     return jsonify({"user": user.to_dict()}), 200

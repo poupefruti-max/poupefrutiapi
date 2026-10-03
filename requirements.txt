@@ -3,6 +3,7 @@ flask-cors==5.0.0
 flask-jwt-extended==4.7.1
 flask-migrate==4.0.7
 flask-sqlalchemy==3.1.1
+flask-limiter==4.1.1
 psycopg[binary]==3.2.10
 psycopg-pool==3.2.8
 python-dotenv==1.0.1

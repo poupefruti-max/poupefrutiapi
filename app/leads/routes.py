@@ -10,7 +10,7 @@ from flask import Blueprint, jsonify, request
 from sqlalchemy.exc import IntegrityError
 
 from ..extensions import db
-from ..models import Lead
+from ..models import Lead, LeadType
 from ..validators import (
     VALORES_CESTA,
     VALORES_TIPO_ESTABELECIMENTO,
@@ -19,10 +19,11 @@ from ..validators import (
     normalizar_texto,
     whatsapp_valido,
 )
+from services import create_lead, DuplicateLeadError
 
 leads_bp = Blueprint("leads", __name__, url_prefix="/api/leads")
 
-ORIGEM_PADRAO = "landing-pouvefruti"
+ORIGEM_PADRAO = "landing-poupefruti"
 
 
 def erro(code: str, message: str, status: int):
@@ -38,22 +39,6 @@ def _payload():
             "invalid_payload", "Envie um corpo JSON no formato de objeto.", 400
         )
     return data, None
-
-
-def _salvar(lead: Lead):
-    """Persiste o lead e traduz IntegrityError em 409."""
-    db.session.add(lead)
-    try:
-        db.session.commit()
-    except IntegrityError:
-        db.session.rollback()
-        return erro("duplicate_lead", "Cadastro duplicado.", 409)
-    return jsonify(
-        {
-            "message": "Cadastro recebido com sucesso!",
-            "lead": lead.to_dict(),
-        }
-    ), 201
 
 
 # ---------------------------------------------------------------------------
@@ -133,17 +118,29 @@ def criar_cliente():
             400,
         )
 
-    lead = Lead(
-        tipo="cliente",
-        nome=dados["nome"],
-        whatsapp=dados["whatsapp"],
-        email=dados["email"],
-        bairro=dados["bairro"],
-        origem=dados["origem"],
-        enviado_em=dados["enviado_em"],
-        cesta=cesta,
-    )
-    return _salvar(lead)
+    extra = {
+        "cesta": cesta,
+        "bairro": dados["bairro"],
+    }
+
+    try:
+        lead = create_lead(
+            type=LeadType.person,
+            name=dados["nome"],
+            phone=dados["whatsapp"],
+            source=dados["origem"],
+            email=dados["email"],
+            extra=extra,
+        )
+    except DuplicateLeadError:
+        return erro("duplicate_lead", "Cadastro duplicado.", 409)
+
+    return jsonify(
+        {
+            "message": "Cadastro recebido com sucesso!",
+            "lead": lead.to_dict(),
+        }
+    ), 201
 
 
 # ---------------------------------------------------------------------------
@@ -179,16 +176,64 @@ def criar_mercado():
             400,
         )
 
-    lead = Lead(
-        tipo="mercado",
-        nome=estabelecimento,
-        whatsapp=dados["whatsapp"],
-        email=dados["email"],
-        bairro=dados["bairro"],
-        origem=dados["origem"],
-        enviado_em=dados["enviado_em"],
-        responsavel=responsavel,
-        estabelecimento=estabelecimento,
-        tipo_estabelecimento=tipo_estabelecimento,
-    )
-    return _salvar(lead)
+    extra = {
+        "responsavel": responsavel,
+        "estabelecimento": estabelecimento,
+        "tipo_estabelecimento": tipo_estabelecimento,
+        "bairro": dados["bairro"],
+    }
+
+    try:
+        lead = create_lead(
+            type=LeadType.establishment,
+            name=estabelecimento,
+            phone=dados["whatsapp"],
+            source=dados["origem"],
+            email=dados["email"],
+            extra=extra,
+        )
+    except DuplicateLeadError:
+        return erro("duplicate_lead", "Cadastro duplicado.", 409)
+
+    return jsonify(
+        {
+            "message": "Cadastro recebido com sucesso!",
+            "lead": lead.to_dict(),
+        }
+    ), 201
+
+
+# ---------------------------------------------------------------------------
+# POST /api/leads/<id>/convert
+# ---------------------------------------------------------------------------
+@leads_bp.post("/<int:lead_id>/convert")
+def converter_lead(lead_id: int):
+    """Converte um lead em usuário/estabelecimento."""
+    from services import convert_lead, LeadAlreadyConvertedError, LeadError
+
+    data = request.get_json(silent=True) or {}
+    password = data.get("password")
+    establishment_data = data.get("establishment")
+
+    try:
+        result = convert_lead(lead_id, password=password, establishment_data=establishment_data)
+    except LeadAlreadyConvertedError as e:
+        return jsonify({
+            "message": "Lead já convertido anteriormente.",
+            "lead": e.args[0] if e.args else {},
+            "user_id": e.existing_user_id,
+            "establishment_id": e.existing_establishment_id,
+        }), 200
+    except LeadError as e:
+        return erro("conversion_error", str(e), 400)
+    except IntegrityError as e:
+        db.session.rollback()
+        return erro("conversion_error", f"Erro de integridade: {e}", 409)
+
+    response = {"message": "Lead convertido com sucesso!", "lead": result["lead"].to_dict()}
+    if "user" in result:
+        response["user"] = result["user"].to_dict()
+    if "establishment" in result:
+        response["establishment"] = result["establishment"].to_dict()
+
+    return jsonify(response), 201

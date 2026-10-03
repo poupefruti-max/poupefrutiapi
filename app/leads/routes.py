@@ -112,8 +112,8 @@ def _validar_comuns(data: dict, exigir_nome: bool = True):
             400,
         )
 
-    if not bairro:
-        return None, erro("invalid_neighborhood", "Informe o bairro.", 400)
+    # bairro pode ser vazio (vira NULL no banco)
+    bairro = normalizar_texto(data.get("bairro"))
 
     # Mercado não pede e-mail na UI (vem vazio). Só validamos quando preenchido.
     if email and not email_valido(email):
@@ -148,7 +148,7 @@ def criar_cliente():
         return erro("tipo_mismatch", "Tipo de cadastro inválido para esta rota.", 400)
 
     cesta = normalizar_texto(data.get("cesta"))
-    if cesta not in VALORES_CESTA:
+    if cesta and cesta not in VALORES_CESTA:
         return erro(
             "invalid_cesta",
             "Informe a cesta de interesse (frutas, legumes ou ambas).",
@@ -156,8 +156,7 @@ def criar_cliente():
         )
 
     extra = {
-        "cesta": cesta,
-        "bairro": dados["bairro"],
+        "enviado_em": dados["enviado_em"],
     }
 
     try:
@@ -168,6 +167,8 @@ def criar_cliente():
             source=dados["origem"],
             email=dados["email"],
             extra=extra,
+            bairro=dados["bairro"],
+            cesta_tipo=cesta,
         )
     except DuplicateLeadError:
         return erro("duplicate_lead", "Cadastro duplicado.", 409)
@@ -212,7 +213,7 @@ def criar_mercado():
         "responsavel": responsavel,
         "estabelecimento": estabelecimento,
         "tipo_estabelecimento": tipo_estabelecimento,
-        "bairro": dados["bairro"],
+        "enviado_em": dados["enviado_em"],
     }
 
     try:
@@ -223,6 +224,7 @@ def criar_mercado():
             source=dados["origem"],
             email=dados["email"],
             extra=extra,
+            bairro=dados["bairro"],
         )
     except DuplicateLeadError:
         return erro("duplicate_lead", "Cadastro duplicado.", 409)

@@ -52,17 +52,21 @@ def create_lead(
     source: str = "landing-poupefruti",
     email: Optional[str] = None,
     extra: Optional[dict] = None,
+    bairro: Optional[str] = None,
+    cesta_tipo: Optional[str] = None,
     session: Optional[Session] = None,
 ) -> Lead:
     """
     Cria um novo lead.
 
     Se já existir um lead com o mesmo email (não nulo) e tipo, atualiza
-    phone/extra/source e retorna o existente (upsert amigável).
+    phone/extra/source/bairro/cesta_tipo e retorna o existente (upsert amigável).
     """
     sess = session or db.session
     email_norm = normalize_email(email)
     phone_norm = normalize_phone(phone)
+    bairro_norm = bairro.strip() if bairro else None
+    cesta_tipo_norm = cesta_tipo.strip() if cesta_tipo else None
 
     # Verifica duplicidade por email + tipo (se email fornecido)
     if email_norm:
@@ -74,6 +78,10 @@ def create_lead(
             # Upsert: atualiza campos mutáveis do lead existente
             existing.phone = phone_norm
             existing.source = source
+            if bairro_norm is not None:
+                existing.bairro = bairro_norm
+            if cesta_tipo_norm is not None:
+                existing.cesta_tipo = cesta_tipo_norm
             if extra:
                 # Merge extra: novo dict para disparar flag_modified
                 merged = {**existing.extra, **extra}
@@ -89,6 +97,8 @@ def create_lead(
         source=source,
         status=LeadStatus.new,
         extra=extra or {},
+        bairro=bairro_norm,
+        cesta_tipo=cesta_tipo_norm,
     )
 
     sess.add(lead)
@@ -105,6 +115,10 @@ def create_lead(
             if existing:
                 existing.phone = phone_norm
                 existing.source = source
+                if bairro_norm is not None:
+                    existing.bairro = bairro_norm
+                if cesta_tipo_norm is not None:
+                    existing.cesta_tipo = cesta_tipo_norm
                 if extra:
                     merged = {**existing.extra, **extra}
                     existing.extra = merged

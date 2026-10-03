@@ -100,6 +100,10 @@ def login():
 @auth_bp.get("/me")
 @jwt_required()
 def me():
+    claims = get_jwt()
+    if claims.get("role") == "admin":
+        return erro("forbidden", "Use o endpoint de admin para administradores."), 403
+
     user = db.session.get(User, int(get_jwt_identity()))
     if user is None:
         return erro("user_not_found", "Usuário não encontrado.", 404)

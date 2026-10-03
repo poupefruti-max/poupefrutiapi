@@ -92,6 +92,39 @@ class User(db.Model):
         return f"<User {self.email}>"
 
 
+class AdminUser(db.Model):
+    __tablename__ = "admin_users"
+
+    id = db.Column(db.Integer, primary_key=True)
+    email = db.Column(CITEXTType(255), unique=True, nullable=False, index=True)
+    password_hash = db.Column(db.String(255), nullable=False)
+    name = db.Column(db.String(120), nullable=True)
+    created_at = db.Column(DateTime(timezone=True), nullable=False, server_default=func.now())
+
+    def set_password(self, raw_password: str) -> None:
+        self.password_hash = bcrypt.hashpw(
+            raw_password.encode("utf-8"), bcrypt.gensalt()
+        ).decode("utf-8")
+
+    def check_password(self, raw_password: str) -> bool:
+        if not self.password_hash:
+            return False
+        return bcrypt.checkpw(
+            raw_password.encode("utf-8"), self.password_hash.encode("utf-8")
+        )
+
+    def to_dict(self) -> dict:
+        return {
+            "id": self.id,
+            "email": self.email,
+            "name": self.name,
+            "created_at": self.created_at.isoformat() if self.created_at else None,
+        }
+
+    def __repr__(self) -> str:
+        return f"<AdminUser {self.email}>"
+
+
 class Lead(db.Model):
     __tablename__ = "leads"
 

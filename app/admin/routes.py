@@ -13,12 +13,8 @@ from ..models import Lead, LeadType, LeadStatus, AdminUser
 from .decorators import admin_required
 from services.leads import update_lead_status, convert_lead, LeadError, LeadAlreadyConvertedError
 
+
 admin_bp = Blueprint("admin", __name__, url_prefix="/api/v1/admin")
-
-
-def erro(code: str, message: str, status: int):
-    """Resposta de erro no formato padrão da API."""
-    return jsonify({"error": {"code": code, "message": message}}), status
 
 
 def _parse_bool(val: str | None) -> bool | None:
@@ -32,6 +28,11 @@ def _parse_int(val: str | None, default: int) -> int:
         return int(val)
     except (TypeError, ValueError):
         return default
+
+
+def _erro(code: str, message: str, status: int):
+    """Resposta de erro no formato padrão da API."""
+    return jsonify({"error": {"code": code, "message": message}}), status
 
 
 # ---------------------------------------------------------------------------
@@ -56,13 +57,13 @@ def list_leads():
         try:
             query = query.filter(Lead.status == LeadStatus(status))
         except ValueError:
-            return erro("invalid_status", f"Status inválido: {status}"), 400
+            return _erro("invalid_status", f"Status inválido: {status}"), 400
 
     if lead_type:
         try:
             query = query.filter(Lead.type == LeadType(lead_type))
         except ValueError:
-            return erro("invalid_type", f"Tipo inválido: {lead_type}"), 400
+            return _erro("invalid_type", f"Tipo inválido: {lead_type}"), 400
 
     if bairro:
         query = query.filter(Lead.bairro.ilike(f"%{bairro}%"))
@@ -109,7 +110,7 @@ def list_leads():
 def get_lead(lead_id: int):
     lead = db.session.get(Lead, lead_id)
     if not lead:
-        return erro("not_found", "Lead não encontrado."), 404
+        return _erro("not_found", "Lead não encontrado.", 404)
 
     return jsonify({"lead": lead.to_dict()}), 200
 
@@ -124,17 +125,17 @@ def change_lead_status(lead_id: int):
     status_str = data.get("status")
 
     if not status_str:
-        return erro("missing_status", "Informe o status desejado."), 400
+        return _erro("missing_status", "Informe o status desejado.", 400)
 
     try:
         new_status = LeadStatus(status_str)
     except ValueError:
-        return erro("invalid_status", f"Status inválido: {status_str}"), 400
+        return _erro("invalid_status", f"Status inválido: {status_str}", 400)
 
     # Validação manual de transição (update_lead_status já faz isso, mas damos feedback melhor)
     lead = db.session.get(Lead, lead_id)
     if not lead:
-        return erro("not_found", "Lead não encontrado."), 404
+        return _erro("not_found", "Lead não encontrado.", 404)
 
     valid_transitions = {
         LeadStatus.new: [LeadStatus.contacted, LeadStatus.qualified, LeadStatus.lost, LeadStatus.converted],
@@ -145,18 +146,19 @@ def change_lead_status(lead_id: int):
     }
 
     if new_status not in valid_transitions.get(lead.status, []):
-        return erro(
+        return _erro(
             "invalid_transition",
             f"Transição inválida de {lead.status.value} para {new_status.value}. "
             f"Permitidas: {[s.value for s in valid_transitions.get(lead.status, [])]}",
-        ), 400
+            400
+        )
 
     try:
         updated = update_lead_status(lead_id, new_status)
         db.session.commit()
     except LeadError as e:
         db.session.rollback()
-        return erro("status_error", str(e), 400)
+        return _erro("status_error", str(e), 400)
 
     return jsonify({"lead": updated.to_dict()}), 200
 
@@ -184,11 +186,11 @@ def convert_lead_endpoint(lead_id: int):
         }), 200
     except LeadError as e:
         db.session.rollback()
-        return erro("conversion_error", str(e), 400)
+        return _erro("conversion_error", str(e), 400)
     except Exception:
         db.session.rollback()
         current_app.logger.exception("Erro ao converter lead")
-        return erro("internal_error", "Erro interno no servidor."), 500
+        return _erro("internal_error", "Erro interno no servidor."), 500
 
     response = {"message": "Lead convertido com sucesso!", "lead": result["lead"].to_dict()}
     if "user" in result:
@@ -257,13 +259,13 @@ def export_csv():
         try:
             query = query.filter(Lead.status == LeadStatus(status))
         except ValueError:
-            return erro("invalid_status", f"Status inválido: {status}"), 400
+            return _erro("invalid_status", f"Status inválido: {status}", 400)
 
     if lead_type:
         try:
             query = query.filter(Lead.type == LeadType(lead_type))
         except ValueError:
-            return erro("invalid_type", f"Tipo inválido: {lead_type}"), 400
+            return _erro("invalid_type", f"Tipo inválido: {lead_type}", 400)
 
     if bairro:
         query = query.filter(Lead.bairro.ilike(f"%{bairro}%"))

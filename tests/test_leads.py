@@ -583,7 +583,7 @@ class TestLeadRoutes:
         assert data["lead"]["extra"]["responsavel"] == "Maria Silva"
 
     def test_convert_lead_route(self, app):
-        """POST /api/leads/<id>/convert converte lead."""
+        """POST /api/v1/admin/leads/<id>/convert converte lead (requer admin)."""
         client = app.test_client()
         # Cria lead
         resp = client.post("/api/leads/cliente", json={
@@ -596,10 +596,27 @@ class TestLeadRoutes:
         })
         lead_id = resp.get_json()["lead"]["id"]
 
-        # Converte
-        resp = client.post(f"/api/leads/{lead_id}/convert", json={
+        # Cria admin e faz login
+        with app.app_context():
+            from app.models import AdminUser
+            admin = AdminUser(email="admin@test.com", name="Admin")
+            admin.set_password("senha123")
+            db.session.add(admin)
+            db.session.commit()
+            admin_id = admin.id
+
+        # Login admin
+        resp = client.post("/api/v1/admin/auth/login", json={
+            "email": "admin@test.com",
             "password": "senha123",
         })
+        assert resp.status_code == 200
+        token = resp.get_json()["access_token"]
+
+        # Converte usando token admin
+        resp = client.post(f"/api/v1/admin/leads/{lead_id}/convert", json={
+            "password": "senha123",
+        }, headers={"Authorization": f"Bearer {token}"})
         assert resp.status_code == 201
         data = resp.get_json()
         assert data["lead"]["status"] == "converted"

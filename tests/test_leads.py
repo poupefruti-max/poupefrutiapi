@@ -456,10 +456,11 @@ class TestLeadPersistence:
             # Novas colunas
             assert lead.bairro == "Centro"
             assert lead.cesta_tipo == "frutas"
-            # extra não tem mais bairro/cesta
-            assert "bairro" not in lead.extra
-            assert "cesta" not in lead.extra
-            assert lead.extra.get("enviado_em") is None
+            # extra TEM bairro/cesta no to_dict() (compatibilidade Opção A)
+            lead_dict = lead.to_dict()
+            assert lead_dict["extra"]["bairro"] == "Centro"
+            assert lead_dict["extra"]["cesta"] == "frutas"
+            assert lead_dict["extra"].get("enviado_em") is None
 
     def test_create_mercado_persists_after_commit(self, app):
         """POST /api/leads/mercado persiste no banco após commit."""
@@ -487,11 +488,12 @@ class TestLeadPersistence:
             # Novas colunas
             assert lead.bairro == "Centro"
             assert lead.cesta_tipo is None
-            # extra não tem mais bairro
-            assert "bairro" not in lead.extra
-            assert lead.extra["responsavel"] == "Maria Silva"
-            assert lead.extra["estabelecimento"] == "Mercado da Maria"
-            assert lead.extra["tipo_estabelecimento"] == "mercado"
+            # extra TEM bairro no to_dict() (compatibilidade Opção A)
+            lead_dict = lead.to_dict()
+            assert lead_dict["extra"]["bairro"] == "Centro"
+            assert lead_dict["extra"]["responsavel"] == "Maria Silva"
+            assert lead_dict["extra"]["estabelecimento"] == "Mercado da Maria"
+            assert lead_dict["extra"]["tipo_estabelecimento"] == "mercado"
 
     def test_duplicate_email_upsert_persists(self, app):
         """Email duplicado faz upsert e persiste alterações (phone/extra/bairro/cesta_tipo)."""
@@ -535,9 +537,10 @@ class TestLeadPersistence:
             assert lead.phone == "19988880000"
             assert lead.bairro == "Vila Nova"
             assert lead.cesta_tipo == "legumes"
-            # extra não tem mais bairro/cesta
-            assert "bairro" not in lead.extra
-            assert "cesta" not in lead.extra
+            # extra TEM bairro/cesta atualizados no to_dict() (compatibilidade Opção A)
+            lead_dict = lead.to_dict()
+            assert lead_dict["extra"]["bairro"] == "Vila Nova"
+            assert lead_dict["extra"]["cesta"] == "legumes"
 
     def test_invalid_payload_no_persist(self, app):
         """Payload inválido não grava nada."""
@@ -621,9 +624,9 @@ class TestLeadRoutes:
         # Novas colunas na resposta
         assert data["lead"]["bairro"] == "Centro"
         assert data["lead"]["cesta_tipo"] == "frutas"
-        # extra não tem mais bairro/cesta
-        assert "bairro" not in data["lead"]["extra"]
-        assert "cesta" not in data["lead"]["extra"]
+        # extra TEM bairro/cesta (compatibilidade Opção A)
+        assert data["lead"]["extra"]["bairro"] == "Centro"
+        assert data["lead"]["extra"]["cesta"] == "frutas"
 
     def test_create_mercado_route(self, app):
         """POST /api/leads/mercado cria lead establishment."""
@@ -644,8 +647,8 @@ class TestLeadRoutes:
         # Novas colunas na resposta
         assert data["lead"]["bairro"] == "Centro"
         assert data["lead"]["cesta_tipo"] is None
-        # extra não tem mais bairro
-        assert "bairro" not in data["lead"]["extra"]
+        # extra TEM bairro (compatibilidade Opção A)
+        assert data["lead"]["extra"]["bairro"] == "Centro"
         assert data["lead"]["extra"]["responsavel"] == "Maria Silva"
 
     def test_convert_lead_route(self, app):

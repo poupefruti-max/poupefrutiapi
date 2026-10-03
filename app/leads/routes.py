@@ -19,6 +19,7 @@ from ..validators import (
     normalizar_texto,
     whatsapp_valido,
 )
+from ..admin.decorators import admin_required
 from services import create_lead, DuplicateLeadError
 
 leads_bp = Blueprint("leads", __name__, url_prefix="/api/leads")
@@ -236,8 +237,9 @@ def criar_mercado():
 # POST /api/leads/<id>/convert
 # ---------------------------------------------------------------------------
 @leads_bp.post("/<int:lead_id>/convert")
+@admin_required
 def converter_lead(lead_id: int):
-    """Converte um lead em usuário/estabelecimento."""
+    """Converte um lead em usuário/estabelecimento. Requer autenticação de admin."""
     from services import convert_lead, LeadAlreadyConvertedError, LeadError
 
     data = request.get_json(silent=True) or {}

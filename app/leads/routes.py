@@ -6,7 +6,7 @@ Consome exatamente o payload produzido por enviarCadastro() na landing page
 assim: API_URL + "/api/leads/cliente" e API_URL + "/api/leads/mercado".
 """
 
-from flask import Blueprint, jsonify, request
+from flask import Blueprint, jsonify, request, current_app
 from sqlalchemy.exc import IntegrityError
 
 from ..extensions import db
@@ -39,6 +39,43 @@ def _payload():
             "invalid_payload", "Envie um corpo JSON no formato de objeto.", 400
         )
     return data, None
+
+
+def _salvar_lead(lead: Lead):
+    """
+    Commita a transação e devolve a resposta de sucesso.
+    Trata IntegrityError (race condition no email único) com upsert.
+    """
+    try:
+        db.session.commit()
+    except IntegrityError:
+        db.session.rollback()
+        # Race condition: dois POSTs simultâneos com mesmo email
+        if lead.email:
+            existing = db.session.query(Lead).filter(
+                Lead.email == lead.email,
+                Lead.type == lead.type
+            ).first()
+            if existing:
+                current_app.logger.info(
+                    "Race condition commit: lead email=%s type=%s id=%s",
+                    lead.email, lead.type.value, existing.id
+                )
+                return jsonify({
+                    "message": "Cadastro recebido com sucesso!",
+                    "lead": existing.to_dict(),
+                }), 201
+        current_app.logger.exception("IntegrityError sem lead existente")
+        return erro("internal_error", "Erro interno no servidor."), 500
+    except Exception:
+        db.session.rollback()
+        current_app.logger.exception("Erro ao salvar lead")
+        return erro("internal_error", "Erro interno no servidor."), 500
+
+    return jsonify({
+        "message": "Cadastro recebido com sucesso!",
+        "lead": lead.to_dict(),
+    }), 201
 
 
 # ---------------------------------------------------------------------------
@@ -135,12 +172,7 @@ def criar_cliente():
     except DuplicateLeadError:
         return erro("duplicate_lead", "Cadastro duplicado.", 409)
 
-    return jsonify(
-        {
-            "message": "Cadastro recebido com sucesso!",
-            "lead": lead.to_dict(),
-        }
-    ), 201
+    return _salvar_lead(lead)
 
 
 # ---------------------------------------------------------------------------
@@ -195,12 +227,7 @@ def criar_mercado():
     except DuplicateLeadError:
         return erro("duplicate_lead", "Cadastro duplicado.", 409)
 
-    return jsonify(
-        {
-            "message": "Cadastro recebido com sucesso!",
-            "lead": lead.to_dict(),
-        }
-    ), 201
+    return _salvar_lead(lead)
 
 
 # ---------------------------------------------------------------------------
@@ -229,6 +256,17 @@ def converter_lead(lead_id: int):
     except IntegrityError as e:
         db.session.rollback()
         return erro("conversion_error", f"Erro de integridade: {e}", 409)
+    except Exception:
+        db.session.rollback()
+        current_app.logger.exception("Erro ao converter lead")
+        return erro("internal_error", "Erro interno no servidor."), 500
+
+    try:
+        db.session.commit()
+    except Exception:
+        db.session.rollback()
+        current_app.logger.exception("Erro ao commitar conversão")
+        return erro("internal_error", "Erro interno no servidor."), 500
 
     response = {"message": "Lead convertido com sucesso!", "lead": result["lead"].to_dict()}
     if "user" in result:

@@ -56,9 +56,9 @@ def create_lead(
 ) -> Lead:
     """
     Cria um novo lead.
-    
-    Se já existir um lead com o mesmo email (não nulo) e tipo, retorna o existente
-    (upsert amigável) em vez de falhar.
+
+    Se já existir um lead com o mesmo email (não nulo) e tipo, atualiza
+    phone/extra/source e retorna o existente (upsert amigável).
     """
     sess = session or db.session
     email_norm = normalize_email(email)
@@ -71,7 +71,14 @@ def create_lead(
             Lead.type == type
         ).first()
         if existing:
-            logger.info("Lead já existe para email=%s type=%s, retornando existente id=%s", email_norm, type.value, existing.id)
+            # Upsert: atualiza campos mutáveis do lead existente
+            existing.phone = phone_norm
+            existing.source = source
+            if extra:
+                # Merge extra: novo dict para disparar flag_modified
+                merged = {**existing.extra, **extra}
+                existing.extra = merged
+            logger.info("Upsert lead email=%s type=%s id=%s", email_norm, type.value, existing.id)
             return existing
 
     lead = Lead(
@@ -96,7 +103,12 @@ def create_lead(
                 Lead.type == type
             ).first()
             if existing:
-                logger.info("Race condition: lead já existe para email=%s type=%s, retornando existente id=%s", email_norm, type.value, existing.id)
+                existing.phone = phone_norm
+                existing.source = source
+                if extra:
+                    merged = {**existing.extra, **extra}
+                    existing.extra = merged
+                logger.info("Race condition upsert email=%s type=%s id=%s", email_norm, type.value, existing.id)
                 return existing
         raise DuplicateLeadError(f"Erro ao criar lead: {e}") from e
 

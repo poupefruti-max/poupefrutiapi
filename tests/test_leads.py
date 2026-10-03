@@ -356,6 +356,146 @@ class TestConvertLead:
             convert_lead(99999, password="senha123")
 
 
+class TestLeadPersistence:
+    """Testes de persistência real (verifica com sessão nova após commit)."""
+
+    def test_create_cliente_persists_after_commit(self, app):
+        """POST /api/leads/cliente persiste no banco após commit."""
+        client = app.test_client()
+        response = client.post("/api/leads/cliente", json={
+            "tipo": "cliente",
+            "nome": "João Silva",
+            "whatsapp": "(19) 99999-0000",
+            "email": "joao@test.com",
+            "bairro": "Centro",
+            "cesta": "frutas",
+        })
+        assert response.status_code == 201
+        lead_id = response.get_json()["lead"]["id"]
+
+        # Nova sessão para verificar persistência real
+        with app.app_context():
+            db.session.remove()
+            from app.models import Lead
+            lead = db.session.get(Lead, lead_id)
+            assert lead is not None
+            assert lead.type.value == "person"
+            assert lead.name == "João Silva"
+            assert lead.email == "joao@test.com"
+            assert lead.phone == "19999990000"
+            assert lead.source == "landing-poupefruti"
+            assert lead.extra["cesta"] == "frutas"
+            assert lead.extra["bairro"] == "Centro"
+
+    def test_create_mercado_persists_after_commit(self, app):
+        """POST /api/leads/mercado persiste no banco após commit."""
+        client = app.test_client()
+        response = client.post("/api/leads/mercado", json={
+            "tipo": "mercado",
+            "responsavel": "Maria Silva",
+            "whatsapp": "(19) 98888-0000",
+            "email": "maria@mercado.com",
+            "bairro": "Centro",
+            "estabelecimento": "Mercado da Maria",
+            "tipoEstabelecimento": "mercado",
+        })
+        assert response.status_code == 201
+        lead_id = response.get_json()["lead"]["id"]
+
+        # Nova sessão para verificar persistência real
+        with app.app_context():
+            db.session.remove()
+            from app.models import Lead
+            lead = db.session.get(Lead, lead_id)
+            assert lead is not None
+            assert lead.type.value == "establishment"
+            assert lead.name == "Mercado da Maria"
+            assert lead.extra["responsavel"] == "Maria Silva"
+            assert lead.extra["estabelecimento"] == "Mercado da Maria"
+            assert lead.extra["tipo_estabelecimento"] == "mercado"
+
+    def test_duplicate_email_upsert_persists(self, app):
+        """Email duplicado faz upsert e persiste alterações (phone/extra)."""
+        client = app.test_client()
+        # Primeiro POST
+        resp1 = client.post("/api/leads/cliente", json={
+            "tipo": "cliente",
+            "nome": "João Original",
+            "whatsapp": "(19) 99999-0000",
+            "email": "dup@test.com",
+            "bairro": "Centro",
+            "cesta": "frutas",
+        })
+        assert resp1.status_code == 201
+        lead_id_1 = resp1.get_json()["lead"]["id"]
+
+        # Segundo POST com mesmo email (upsert) - telefone válido com 9 dígitos
+        resp2 = client.post("/api/leads/cliente", json={
+            "tipo": "cliente",
+            "nome": "João Atualizado",
+            "whatsapp": "(19) 98888-0000",  # telefone diferente (válido)
+            "email": "dup@test.com",
+            "bairro": "Vila Nova",  # bairro diferente
+            "cesta": "legumes",  # cesta diferente
+        })
+        assert resp2.status_code == 201
+        lead_id_2 = resp2.get_json()["lead"]["id"]
+
+        # Deve ser o mesmo lead (upsert)
+        assert lead_id_1 == lead_id_2
+
+        # Nova sessão para verificar persistência real
+        with app.app_context():
+            db.session.remove()
+            from app.models import Lead
+            lead = db.session.get(Lead, lead_id_1)
+            assert lead is not None
+            # Nome NÃO deve mudar (mantém o original no upsert)
+            assert lead.name == "João Original"
+            # Phone e extra DEVEM ser atualizados
+            assert lead.phone == "19988880000"
+            assert lead.extra["cesta"] == "legumes"
+            assert lead.extra["bairro"] == "Vila Nova"
+
+    def test_invalid_payload_no_persist(self, app):
+        """Payload inválido não grava nada."""
+        client = app.test_client()
+        response = client.post("/api/leads/cliente", json={
+            "tipo": "cliente",
+            # sem nome
+            "whatsapp": "(19) 99999-0000",
+            "email": "invalido@test.com",
+            "bairro": "Centro",
+            "cesta": "frutas",
+        })
+        assert response.status_code == 400
+
+        with app.app_context():
+            db.session.remove()
+            from app.models import Lead
+            count = db.session.query(Lead).count()
+            assert count == 0
+
+    def test_invalid_tipo_no_persist(self, app):
+        """Tipo desconhecido não grava nada."""
+        client = app.test_client()
+        response = client.post("/api/leads/cliente", json={
+            "tipo": "xyz",  # inválido
+            "nome": "Teste",
+            "whatsapp": "(19) 99999-0000",
+            "email": "tipo@test.com",
+            "bairro": "Centro",
+            "cesta": "frutas",
+        })
+        assert response.status_code == 400
+
+        with app.app_context():
+            db.session.remove()
+            from app.models import Lead
+            count = db.session.query(Lead).count()
+            assert count == 0
+
+
 class TestLeadRoutes:
     """Testes de integração para rotas de leads."""
 
@@ -416,3 +556,14 @@ class TestLeadRoutes:
         assert data["lead"]["status"] == "converted"
         assert "user" in data
         assert data["user"]["email"] == "joao@test.com"
+
+        # Verifica persistência com nova sessão
+        with app.app_context():
+            db.session.remove()
+            from app.models import Lead, User
+            lead = db.session.get(Lead, lead_id)
+            assert lead is not None
+            assert lead.status.value == "converted"
+            user = db.session.query(User).filter_by(email="joao@test.com").first()
+            assert user is not None
+            assert user.lead_id == lead_id

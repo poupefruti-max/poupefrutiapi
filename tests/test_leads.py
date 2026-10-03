@@ -384,8 +384,13 @@ class TestLeadPersistence:
             assert lead.email == "joao@test.com"
             assert lead.phone == "19999990000"
             assert lead.source == "landing-poupefruti"
-            assert lead.extra["cesta"] == "frutas"
-            assert lead.extra["bairro"] == "Centro"
+            # Novas colunas
+            assert lead.bairro == "Centro"
+            assert lead.cesta_tipo == "frutas"
+            # extra não tem mais bairro/cesta
+            assert "bairro" not in lead.extra
+            assert "cesta" not in lead.extra
+            assert lead.extra.get("enviado_em") is None
 
     def test_create_mercado_persists_after_commit(self, app):
         """POST /api/leads/mercado persiste no banco após commit."""
@@ -410,12 +415,86 @@ class TestLeadPersistence:
             assert lead is not None
             assert lead.type.value == "establishment"
             assert lead.name == "Mercado da Maria"
+            # Novas colunas
+            assert lead.bairro == "Centro"
+            assert lead.cesta_tipo is None
+            # extra não tem mais bairro
+            assert "bairro" not in lead.extra
+            assert lead.extra["responsavel"] == "Maria Silva"
+            assert lead.extra["estabelecimento"] == "Mercado da Maria"
+            assert lead.extra["tipo_estabelecimento"] == "mercado"
+
+
+class TestLeadPersistence:
+    """Testes de persistência real (verifica com sessão nova após commit)."""
+
+    def test_create_cliente_persists_after_commit(self, app):
+        """POST /api/leads/cliente persiste no banco após commit."""
+        client = app.test_client()
+        response = client.post("/api/leads/cliente", json={
+            "tipo": "cliente",
+            "nome": "João Silva",
+            "whatsapp": "(19) 99999-0000",
+            "email": "joao@test.com",
+            "bairro": "Centro",
+            "cesta": "frutas",
+        })
+        assert response.status_code == 201
+        lead_id = response.get_json()["lead"]["id"]
+
+        # Nova sessão para verificar persistência real
+        with app.app_context():
+            db.session.remove()
+            from app.models import Lead
+            lead = db.session.get(Lead, lead_id)
+            assert lead is not None
+            assert lead.type.value == "person"
+            assert lead.name == "João Silva"
+            assert lead.email == "joao@test.com"
+            assert lead.phone == "19999990000"
+            assert lead.source == "landing-poupefruti"
+            # Novas colunas
+            assert lead.bairro == "Centro"
+            assert lead.cesta_tipo == "frutas"
+            # extra não tem mais bairro/cesta
+            assert "bairro" not in lead.extra
+            assert "cesta" not in lead.extra
+            assert lead.extra.get("enviado_em") is None
+
+    def test_create_mercado_persists_after_commit(self, app):
+        """POST /api/leads/mercado persiste no banco após commit."""
+        client = app.test_client()
+        response = client.post("/api/leads/mercado", json={
+            "tipo": "mercado",
+            "responsavel": "Maria Silva",
+            "whatsapp": "(19) 98888-0000",
+            "email": "maria@mercado.com",
+            "bairro": "Centro",
+            "estabelecimento": "Mercado da Maria",
+            "tipoEstabelecimento": "mercado",
+        })
+        assert response.status_code == 201
+        lead_id = response.get_json()["lead"]["id"]
+
+        # Nova sessão para verificar persistência real
+        with app.app_context():
+            db.session.remove()
+            from app.models import Lead
+            lead = db.session.get(Lead, lead_id)
+            assert lead is not None
+            assert lead.type.value == "establishment"
+            assert lead.name == "Mercado da Maria"
+            # Novas colunas
+            assert lead.bairro == "Centro"
+            assert lead.cesta_tipo is None
+            # extra não tem mais bairro
+            assert "bairro" not in lead.extra
             assert lead.extra["responsavel"] == "Maria Silva"
             assert lead.extra["estabelecimento"] == "Mercado da Maria"
             assert lead.extra["tipo_estabelecimento"] == "mercado"
 
     def test_duplicate_email_upsert_persists(self, app):
-        """Email duplicado faz upsert e persiste alterações (phone/extra)."""
+        """Email duplicado faz upsert e persiste alterações (phone/extra/bairro/cesta_tipo)."""
         client = app.test_client()
         # Primeiro POST
         resp1 = client.post("/api/leads/cliente", json={
@@ -452,10 +531,13 @@ class TestLeadPersistence:
             assert lead is not None
             # Nome NÃO deve mudar (mantém o original no upsert)
             assert lead.name == "João Original"
-            # Phone e extra DEVEM ser atualizados
+            # Phone, bairro e cesta_tipo DEVEM ser atualizados
             assert lead.phone == "19988880000"
-            assert lead.extra["cesta"] == "legumes"
-            assert lead.extra["bairro"] == "Vila Nova"
+            assert lead.bairro == "Vila Nova"
+            assert lead.cesta_tipo == "legumes"
+            # extra não tem mais bairro/cesta
+            assert "bairro" not in lead.extra
+            assert "cesta" not in lead.extra
 
     def test_invalid_payload_no_persist(self, app):
         """Payload inválido não grava nada."""
@@ -495,6 +577,28 @@ class TestLeadPersistence:
             count = db.session.query(Lead).count()
             assert count == 0
 
+    def test_empty_bairro_cesta_becomes_null(self, app):
+        """bairro/cesta vazios viram NULL nas colunas."""
+        client = app.test_client()
+        response = client.post("/api/leads/cliente", json={
+            "tipo": "cliente",
+            "nome": "Teste Vazio",
+            "whatsapp": "(19) 99999-0000",
+            "email": "vazio@test.com",
+            "bairro": "",
+            "cesta": "",
+        })
+        assert response.status_code == 201
+        lead_id = response.get_json()["lead"]["id"]
+
+        with app.app_context():
+            db.session.remove()
+            from app.models import Lead
+            lead = db.session.get(Lead, lead_id)
+            assert lead is not None
+            assert lead.bairro is None
+            assert lead.cesta_tipo is None
+
 
 class TestLeadRoutes:
     """Testes de integração para rotas de leads."""
@@ -514,6 +618,12 @@ class TestLeadRoutes:
         data = response.get_json()
         assert data["lead"]["type"] == "person"
         assert data["lead"]["name"] == "João Silva"
+        # Novas colunas na resposta
+        assert data["lead"]["bairro"] == "Centro"
+        assert data["lead"]["cesta_tipo"] == "frutas"
+        # extra não tem mais bairro/cesta
+        assert "bairro" not in data["lead"]["extra"]
+        assert "cesta" not in data["lead"]["extra"]
 
     def test_create_mercado_route(self, app):
         """POST /api/leads/mercado cria lead establishment."""
@@ -531,6 +641,11 @@ class TestLeadRoutes:
         data = response.get_json()
         assert data["lead"]["type"] == "establishment"
         assert data["lead"]["name"] == "Mercado da Maria"
+        # Novas colunas na resposta
+        assert data["lead"]["bairro"] == "Centro"
+        assert data["lead"]["cesta_tipo"] is None
+        # extra não tem mais bairro
+        assert "bairro" not in data["lead"]["extra"]
         assert data["lead"]["extra"]["responsavel"] == "Maria Silva"
 
     def test_convert_lead_route(self, app):

@@ -105,11 +105,20 @@ class Lead(db.Model):
     extra = db.Column(JSONBType, nullable=False, default=dict, server_default=text("'{}'"))
     converted_at = db.Column(DateTime(timezone=True), nullable=True)
     created_at = db.Column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    bairro = db.Column(db.Text, nullable=True)
+    cesta_tipo = db.Column(db.Text, nullable=True)
 
     user = db.relationship("User", back_populates="lead", foreign_keys="User.lead_id", uselist=False)
     establishment = db.relationship("Establishment", back_populates="lead", foreign_keys="Establishment.lead_id", uselist=False)
 
     def to_dict(self) -> dict:
+        # Compatibilidade: extra continua com bairro/cesta se existirem (dados antigos)
+        extra_compat = dict(self.extra)
+        if self.bairro is not None:
+            extra_compat["bairro"] = self.bairro
+        if self.cesta_tipo is not None:
+            extra_compat["cesta"] = self.cesta_tipo
+
         return {
             "id": self.id,
             "type": self.type.value if self.type else None,
@@ -118,7 +127,9 @@ class Lead(db.Model):
             "phone": self.phone,
             "source": self.source,
             "status": self.status.value if self.status else None,
-            "extra": self.extra,
+            "extra": extra_compat,
+            "bairro": self.bairro,
+            "cesta_tipo": self.cesta_tipo,
             "converted_at": self.converted_at.isoformat() if self.converted_at else None,
             "created_at": self.created_at.isoformat() if self.created_at else None,
         }

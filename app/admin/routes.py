@@ -1,6 +1,6 @@
 """Blueprint do painel admin: /api/v1/admin."""
 
-from datetime import datetime, timedelta
+from datetime import timedelta
 from io import StringIO
 import csv
 
@@ -9,6 +9,7 @@ from sqlalchemy import func, or_, desc
 
 from ..extensions import db
 from ..models import Lead, LeadType, LeadStatus
+from ..timeutils import agora_utc
 from .decorators import admin_required
 from services.leads import update_lead_status, convert_lead, LeadError, LeadAlreadyConvertedError
 
@@ -206,7 +207,9 @@ def convert_lead_endpoint(lead_id: int):
 @admin_bp.get("/stats")
 @admin_required
 def stats():
-    now = datetime.utcnow()
+    now = agora_utc()
+    # Meia-noite em UTC: `replace` preserva o tzinfo, então o resultado
+    # continua "aware" e é comparável com a coluna TIMESTAMPTZ created_at.
     today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
     week_ago = today_start - timedelta(days=7)
 
@@ -319,6 +322,8 @@ def export_csv():
     output.seek(0)
     response = make_response(output.getvalue())
     response.headers["Content-Type"] = "text/csv; charset=utf-8"
-    response.headers["Content-Disposition"] = f'attachment; filename="leads_{datetime.utcnow().strftime("%Y%m%d_%H%M%S")}.csv"'
+    response.headers["Content-Disposition"] = (
+        f'attachment; filename="leads_{agora_utc().strftime("%Y%m%d_%H%M%S")}.csv"'
+    )
 
     return response

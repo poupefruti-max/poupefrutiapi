@@ -21,13 +21,14 @@ import unicodedata
 from datetime import datetime, timedelta
 from typing import Optional
 
-from sqlalchemy import update
+from sqlalchemy import func, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.extensions import db
 from app.models import Establishment, EstablishmentMember, Invitation, MemberRole, User
 from app.rbac import normalizar_role
+from app.timeutils import agora_utc
 
 logger = logging.getLogger(__name__)
 
@@ -122,7 +123,13 @@ def montar_link(app_base_url: str, token: str) -> str:
 
 
 def _agora() -> datetime:
-    return datetime.utcnow()
+    """Instante atual em UTC com fuso.
+
+    Usado tanto nos valores gravados (revoked_at, accepted_at, expires_at)
+    quanto nos filtros `expires_at > agora` do UPDATE do aceite. Com fuso, o
+    PostgreSQL compara certo; sem fuso, ele assumiria o fuso da sessão.
+    """
+    return agora_utc()
 
 
 # ---------------------------------------------------------------------------
@@ -284,15 +291,21 @@ def aceitar_convite(
     papel = convite.role.value if convite.role else MemberRole.owner.value
 
     # Passo 1: reserva o convite de forma atômica.
+    #
+    # A comparação de tempo fica a cargo do BANCO (`func.now()`), não do Python.
+    # Passar um datetime do Python como parâmetro misturaria fuso: o PostgreSQL
+    # guarda TIMESTAMPTZ (com fuso) e o SQLite guarda sem fuso, e comparar os
+    # dois levanta "can't compare offset-naive and offset-aware datetimes".
+    # Cada banco compara o que ele mesmo gravou, e o relógio é o do servidor.
     resultado = sess.execute(
         update(Invitation)
         .where(
             Invitation.id == convite.id,
             Invitation.accepted_at.is_(None),
             Invitation.revoked_at.is_(None),
-            Invitation.expires_at > _agora(),
+            Invitation.expires_at > func.now(),
         )
-        .values(accepted_at=_agora())
+        .values(accepted_at=func.now())
     )
 
     if (resultado.rowcount or 0) != 1:

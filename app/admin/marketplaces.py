@@ -1,7 +1,5 @@
 """Onboarding de mercados: /api/v1/admin (rotas de estabelecimento)."""
 
-from datetime import datetime
-
 from flask import Blueprint, current_app, jsonify, request
 from flask_jwt_extended import get_jwt_identity
 from sqlalchemy import desc
@@ -15,6 +13,7 @@ from ..models import (
     LeadType,
 )
 from ..rbac import EstablishmentStatus, MemberRole, normalizar_role
+from ..timeutils import agora_utc, como_utc
 from ..validators import normalizar_texto
 from .decorators import admin_required
 from services import invitations as svc_convites
@@ -32,12 +31,17 @@ def _admin_id() -> int:
 
 
 def _status_convite(convite: Invitation) -> str:
-    """Traduz o estado do convite para um rótulo estável na API."""
+    """Traduz o estado do convite para um rótulo estável na API.
+
+    `expires_at` é normalizado antes da comparação: o PostgreSQL devolve a
+    data com fuso e o SQLite sem, e comparar as duas com `agora_utc()`
+    levantaria TypeError.
+    """
     if convite.accepted_at is not None:
         return "accepted"
     if convite.revoked_at is not None:
         return "revoked"
-    if convite.expires_at is not None and convite.expires_at <= datetime.utcnow():
+    if como_utc(convite.expires_at) is not None and como_utc(convite.expires_at) <= agora_utc():
         return "expired"
     return "pending"
 
@@ -100,7 +104,7 @@ def aprovar_mercado(lead_id: int):
         )
 
         lead.status = LeadStatus.converted
-        lead.converted_at = datetime.utcnow()
+        lead.converted_at = agora_utc()
 
         db.session.commit()
     except svc_convites.ErroConvite as erro:

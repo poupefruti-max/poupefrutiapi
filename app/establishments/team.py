@@ -16,6 +16,7 @@ from ..rbac import (
     pode_agir_sobre,
     pode_conceder_papel,
 )
+from ..timeutils import agora_utc, como_utc
 from .auth import carregar_membership, establishment_role_required
 
 team_bp = Blueprint("establishments_team", __name__, url_prefix="/api/v1/establishments")
@@ -37,13 +38,16 @@ def _payload() -> dict:
 
 
 def _status_convite(convite: Invitation) -> str:
-    from datetime import datetime
-
+    """
+    Estado do convite para a API. Normaliza `expires_at` antes de comparar:
+    o PostgreSQL devolve a data com fuso e o SQLite sem; comparar as duas com
+    `agora_utc()` levantaria TypeError.
+    """
     if convite.accepted_at is not None:
         return "accepted"
     if convite.revoked_at is not None:
         return "revoked"
-    if convite.expires_at is not None and convite.expires_at <= datetime.utcnow():
+    if como_utc(convite.expires_at) is not None and como_utc(convite.expires_at) <= agora_utc():
         return "expired"
     return "pending"
 
@@ -206,8 +210,6 @@ def gerar_convite(establishment_id: int):
 @establishment_role_required("convidar_staff")
 def revogar_convite(establishment_id: int, invitation_id: int):
     """Revoga um convite pendente do próprio mercado."""
-    from datetime import datetime
-
     convite = db.session.get(Invitation, invitation_id)
     if convite is None or convite.establishment_id != g.establishment.id:
         return _erro("not_found", "Convite não encontrado.", 404)
@@ -225,7 +227,7 @@ def revogar_convite(establishment_id: int, invitation_id: int):
             409,
         )
 
-    convite.revoked_at = datetime.utcnow()
+    convite.revoked_at = agora_utc()
     db.session.commit()
     return jsonify({"invitation": _convite_dict(convite)}), 200
 

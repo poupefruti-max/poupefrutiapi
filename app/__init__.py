@@ -70,6 +70,7 @@ def _init_extensions(app: Flask) -> None:
     )
     limiter.init_app(app)
     _aplicar_proxy_fix(app)
+    _aplicar_cors_tardio(app)
 
 
 def _aplicar_proxy_fix(app: Flask) -> None:
@@ -104,6 +105,43 @@ def _aplicar_proxy_fix(app: Flask) -> None:
         x_prefix=0,
     )
     app.logger.info("ProxyFix ativo (x_for=%s)", x_for)
+
+
+def _aplicar_cors_tardio(app: Flask) -> None:
+    """Red de segurança para o CORS, no nivel do WSGI.
+
+    O flask-cors trabalha por `after_request`, o que cobre 404, 405, 429 e 500
+    normalmente. Mas se a falha acontecer ANTES do after_request — um erro na
+    propria aplicacao, um handler que levanta, o worker caindo no meio da
+    requisicao — a resposta escapa sem nenhum cabecalho de CORS. O navegador
+    entao acusa "falha de CORS" e o desenvolvedor nunca ve a mensagem de verdade.
+
+    Este wrapper pega a resposta no nivel WSGI (antes do gunicorn) e acrescenta
+    os cabecalhos quando a origem e' permitida, se ainda faltar. Nao substitui
+    o flask-cors: so completa o que faltou.
+    """
+    origens = set(app.config.get("CORS_ORIGINS") or [])
+    metodos = "GET, POST, PUT, PATCH, DELETE, OPTIONS"
+    wsgi_original = app.wsgi_app
+
+    def com_cors_tardio(environ, start_response):
+        def start_response_corrigido(status, headers, exc_info=None):
+            origem = environ.get("HTTP_ORIGIN")
+            metodo = environ.get("REQUEST_METHOD", "GET").upper()
+            ja_tem = any(k.lower() == "access-control-allow-origin" for k, _ in headers)
+
+            if origem and origem in origens and not ja_tem:
+                if metodo == "OPTIONS":
+                    headers.append(("Access-Control-Allow-Origin", origem))
+                    headers.append(("Access-Control-Allow-Methods", metodos))
+                    headers.append(("Access-Control-Max-Age", "600"))
+                else:
+                    headers.append(("Access-Control-Allow-Origin", origem))
+            return start_response(status, headers, exc_info)
+
+        return wsgi_original(environ, start_response_corrigido)
+
+    app.wsgi_app = com_cors_tardio
 
 
 def _register_blueprints(app: Flask) -> None:
@@ -151,8 +189,44 @@ def _register_jwt_handlers(app: Flask) -> None:
         )
 
 
+def _descartar_sessao_com_seguranca(app: Flask) -> None:
+    """Rollback da sessão sem nunca deixar o handler de erro levantar.
+
+    O 500 é justamente a situação em que a sessão pode estar destruída
+    (conexão morta, transacao em estado invalido). Se `rollback()` levanta
+    dentro do handler, a excecao escapa do request inteiro: o gunicorn
+    devolve um 500 cru, SEM os cabecalhos de CORS, e o navegador acusa
+    "falha de CORS" quando o problema era outro.
+
+    Por isso o rollback e o log vao protegidos: o handler precisa SEMPRE
+    devolver resposta, e a resposta precisa passar pelo after_request do
+    flask-cors como qualquer outra.
+    """
+    try:
+        db.session.rollback()
+    except Exception:
+        try:
+            app.logger.warning(
+                "rollback falhou no tratamento de erro; descartando a sessao",
+                exc_info=True,
+            )
+        except Exception:
+            pass
+
+        try:
+            db.session.remove()
+        except Exception:
+            # Ultimo recurso: sem sessao nao ha mais nada a fazer aqui.
+            pass
+
+
 def _register_error_handlers(app: Flask) -> None:
-    """Garante que toda resposta de erro saia no mesmo formato JSON."""
+    """Garante que toda resposta de erro saia no mesmo formato JSON.
+
+    Todas passam pelo after_request do flask-cors, entao carregam
+    Access-Control-Allow-Origin mesmo sendo erro (404/405/429/500) — sem isso
+    o front veria "falha de CORS" em vez da mensagem de verdade.
+    """
 
     @app.errorhandler(404)
     def not_found(_err):
@@ -184,8 +258,12 @@ def _register_error_handlers(app: Flask) -> None:
 
     @app.errorhandler(500)
     def internal_error(err):
-        db.session.rollback()
-        app.logger.exception("Erro interno: %s", err)
+        _descartar_sessao_com_seguranca(app)
+        try:
+            app.logger.exception("Erro interno: %s", err)
+        except Exception:
+            # Log nunca pode impedir a resposta.
+            pass
         return (
             jsonify(
                 {

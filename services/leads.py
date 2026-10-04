@@ -1,7 +1,6 @@
 """Serviços para gerenciamento de leads."""
 
 import logging
-from datetime import datetime
 from typing import Optional
 
 from sqlalchemy.exc import IntegrityError
@@ -9,6 +8,7 @@ from sqlalchemy.orm import Session
 
 from app.models import Lead, LeadType, LeadStatus, User
 from app.extensions import db
+from app.timeutils import agora_utc
 
 logger = logging.getLogger(__name__)
 
@@ -154,7 +154,7 @@ def update_lead_status(
 
     lead.status = status
     if status == LeadStatus.converted:
-        lead.converted_at = datetime.utcnow()
+        lead.converted_at = agora_utc()
 
     sess.flush()
     return lead
@@ -218,7 +218,7 @@ def _convert_person(lead: Lead, password: Optional[str], sess: Session) -> dict:
         if user.lead_id is None:
             user.lead_id = lead.id
         lead.status = LeadStatus.converted
-        lead.converted_at = datetime.utcnow()
+        lead.converted_at = agora_utc()
         sess.flush()
         return {"lead": lead, "user": user}
 
@@ -233,6 +233,6 @@ def _convert_person(lead: Lead, password: Optional[str], sess: Session) -> dict:
     sess.flush()
 
     lead.status = LeadStatus.converted
-    lead.converted_at = datetime.utcnow()
+    lead.converted_at = agora_utc()
 
     return {"lead": lead, "user": user}

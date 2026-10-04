@@ -4,10 +4,21 @@ import bcrypt
 import enum
 import json
 from datetime import datetime
-from sqlalchemy import DateTime, Enum, Index, func, text, String, TypeDecorator, Text
+from sqlalchemy import (
+    Boolean,
+    CheckConstraint,
+    DateTime,
+    Enum,
+    String,
+    Text,
+    TypeDecorator,
+    func,
+    text,
+)
 from sqlalchemy.dialects.postgresql import CITEXT, JSONB
 
 from .extensions import db
+from .rbac import EstablishmentStatus, MemberRole
 
 
 class CITEXTType(TypeDecorator):
@@ -66,6 +77,11 @@ class User(db.Model):
     created_at = db.Column(DateTime(timezone=True), nullable=False, server_default=func.now())
 
     lead = db.relationship("Lead", back_populates="user", foreign_keys=[lead_id])
+    memberships = db.relationship(
+        "EstablishmentMember",
+        back_populates="user",
+        foreign_keys="EstablishmentMember.user_id",
+    )
 
     def set_password(self, raw_password: str) -> None:
         self.password_hash = bcrypt.hashpw(
@@ -87,6 +103,18 @@ class User(db.Model):
             "name": self.name,
             "created_at": self.created_at.isoformat() if self.created_at else None,
         }
+
+    def to_dict_com_estabelecimentos(self) -> dict:
+        """Usuário + os estabelecimentos onde tem vínculo, com o papel de cada um."""
+        dados = self.to_dict()
+        dados["establishments"] = [
+            {
+                "establishment_id": vinculo.establishment_id,
+                "role": vinculo.role.value if vinculo.role else None,
+            }
+            for vinculo in self.memberships
+        ]
+        return dados
 
     def __repr__(self) -> str:
         return f"<User {self.email}>"
@@ -163,6 +191,9 @@ class Lead(db.Model):
             "extra": extra_compat,
             "bairro": self.bairro,
             "cesta_tipo": self.cesta_tipo,
+            # Preenchido quando o lead vira pessoa ou mercado.
+            "user_id": self.user.id if self.user else None,
+            "establishment_id": self.establishment.id if self.establishment else None,
             "converted_at": self.converted_at.isoformat() if self.converted_at else None,
             "created_at": self.created_at.isoformat() if self.created_at else None,
         }
@@ -177,12 +208,32 @@ class Establishment(db.Model):
     id = db.Column(db.Integer, primary_key=True)
     lead_id = db.Column(db.Integer, db.ForeignKey("leads.id", ondelete="SET NULL"), nullable=True, unique=True, index=True)
     name = db.Column(db.String(160), nullable=False)
-    cnpj = db.Column(db.String(18), unique=True, nullable=False, index=True)
+    # O CNPJ passa a ser opcional: o dono do mercado informa depois do onboarding.
+    cnpj = db.Column(db.String(18), unique=True, nullable=True, index=True)
     address = db.Column(db.Text, nullable=True)
+    # Gerado na aprovação, a partir do nome. Único quando presente.
+    slug = db.Column(db.String(160), unique=True, nullable=True, index=True)
+    status = db.Column(
+        Enum(EstablishmentStatus, native_enum=False),
+        nullable=False,
+        default=EstablishmentStatus.pending,
+        server_default=text("'pending'"),
+        index=True,
+    )
+    phone = db.Column(db.String(20), nullable=True)
+    description = db.Column(db.Text, nullable=True)
+    opening_hours = db.Column(db.Text, nullable=True)
+    is_published = db.Column(Boolean, nullable=False, default=False, server_default=text("false"))
     created_at = db.Column(DateTime(timezone=True), nullable=False, server_default=func.now())
 
     lead = db.relationship("Lead", back_populates="establishment", foreign_keys="Establishment.lead_id")
     members = db.relationship("EstablishmentMember", back_populates="establishment", cascade="all, delete-orphan")
+    invitations = db.relationship(
+        "Invitation",
+        back_populates="establishment",
+        cascade="all, delete-orphan",
+        foreign_keys="Invitation.establishment_id",
+    )
 
     def to_dict(self) -> dict:
         return {
@@ -191,11 +242,94 @@ class Establishment(db.Model):
             "name": self.name,
             "cnpj": self.cnpj,
             "address": self.address,
+            "slug": self.slug,
+            "status": self.status.value if self.status else None,
+            "phone": self.phone,
+            "description": self.description,
+            "opening_hours": self.opening_hours,
+            "is_published": self.is_published,
             "created_at": self.created_at.isoformat() if self.created_at else None,
         }
 
     def __repr__(self) -> str:
-        return f"<Establishment {self.name} {self.cnpj}>"
+        return f"<Establishment {self.name} {self.slug}>"
+
+
+class Invitation(db.Model):
+    """Convite de acesso a um estabelecimento.
+
+    Guarda apenas o SHA-256 do token: o valor em claro existe somente no
+    retorno da criação, nunca no banco.
+    """
+
+    __tablename__ = "invitations"
+
+    id = db.Column(db.Integer, primary_key=True)
+    establishment_id = db.Column(
+        db.Integer,
+        db.ForeignKey("establishments.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    role = db.Column(
+        Enum(MemberRole, native_enum=False),
+        nullable=False,
+        default=MemberRole.owner,
+        server_default=text("'owner'"),
+    )
+    token_hash = db.Column(db.String(64), unique=True, nullable=False, index=True)
+
+    # Exatamente um dos dois é preenchido: ou um admin gerou, ou um membro.
+    created_by_admin_id = db.Column(
+        db.Integer, db.ForeignKey("admin_users.id", ondelete="SET NULL"), nullable=True
+    )
+    created_by_user_id = db.Column(
+        db.Integer, db.ForeignKey("users.id", ondelete="SET NULL"), nullable=True
+    )
+
+    expires_at = db.Column(DateTime(timezone=True), nullable=False, index=True)
+    accepted_at = db.Column(DateTime(timezone=True), nullable=True)
+    accepted_user_id = db.Column(
+        db.Integer, db.ForeignKey("users.id", ondelete="SET NULL"), nullable=True
+    )
+    revoked_at = db.Column(DateTime(timezone=True), nullable=True)
+    created_at = db.Column(DateTime(timezone=True), nullable=False, server_default=func.now())
+
+    establishment = db.relationship(
+        "Establishment", back_populates="invitations", foreign_keys=[establishment_id]
+    )
+    created_by_admin = db.relationship("AdminUser", foreign_keys=[created_by_admin_id])
+    accepted_user = db.relationship("User", foreign_keys=[accepted_user_id])
+
+    __table_args__ = (
+        # Exatamente um criador: forma portátil (num_nonnulls() é só do PostgreSQL).
+        CheckConstraint(
+            "(created_by_admin_id IS NOT NULL AND created_by_user_id IS NULL) "
+            "OR (created_by_admin_id IS NULL AND created_by_user_id IS NOT NULL)",
+            name="ck_invitations_one_creator",
+        ),
+    )
+
+    def esta_pendente(self, agora=None) -> bool:
+        """True quando o convite ainda pode ser usado."""
+        if self.accepted_at is not None or self.revoked_at is not None:
+            return False
+        return self.expires_at > (agora or datetime.utcnow())
+
+    def to_dict(self) -> dict:
+        return {
+            "id": self.id,
+            "establishment_id": self.establishment_id,
+            "role": self.role.value if self.role else None,
+            "expires_at": self.expires_at.isoformat() if self.expires_at else None,
+            "accepted_at": self.accepted_at.isoformat() if self.accepted_at else None,
+            "accepted_user_id": self.accepted_user_id,
+            "revoked_at": self.revoked_at.isoformat() if self.revoked_at else None,
+            "created_at": self.created_at.isoformat() if self.created_at else None,
+        }
+
+    def __repr__(self) -> str:
+        return f"<Invitation est={self.establishment_id} role={self.role}>"
 
 
 class EstablishmentMember(db.Model):
@@ -203,17 +337,22 @@ class EstablishmentMember(db.Model):
 
     user_id = db.Column(db.Integer, db.ForeignKey("users.id", ondelete="CASCADE"), primary_key=True)
     establishment_id = db.Column(db.Integer, db.ForeignKey("establishments.id", ondelete="CASCADE"), primary_key=True)
-    role = db.Column(db.String(30), nullable=False, default="owner", server_default=text("'owner'"))
+    role = db.Column(
+        Enum(MemberRole, native_enum=False),
+        nullable=False,
+        default=MemberRole.owner,
+        server_default=text("'owner'"),
+    )
     created_at = db.Column(DateTime(timezone=True), nullable=False, server_default=func.now())
 
-    user = db.relationship("User", foreign_keys=[user_id])
+    user = db.relationship("User", back_populates="memberships", foreign_keys=[user_id])
     establishment = db.relationship("Establishment", back_populates="members", foreign_keys=[establishment_id])
 
     def to_dict(self) -> dict:
         return {
             "user_id": self.user_id,
             "establishment_id": self.establishment_id,
-            "role": self.role,
+            "role": self.role.value if self.role else None,
             "created_at": self.created_at.isoformat() if self.created_at else None,
         }
 

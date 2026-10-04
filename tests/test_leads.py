@@ -209,8 +209,8 @@ class TestConvertLead:
         assert result["lead"].status == LeadStatus.converted
         assert result["lead"].converted_at is not None
 
-    def test_convert_establishment_creates_establishment_user_member(self, session):
-        """Conversão de establishment cria Establishment + User + Member."""
+    def test_convert_establishment_lead_is_rejected(self, session):
+        """Lead de mercado não passa por convert_lead: usa approve-market."""
         lead = create_lead(
             type=LeadType.establishment,
             name="Mercado Central",
@@ -218,35 +218,9 @@ class TestConvertLead:
             email="contato@mercado.com",
         )
 
-        result = convert_lead(
-            lead.id,
-            password="senha123",
-            establishment_data={"cnpj": "12.345.678/0001-90", "name": "Mercado Central", "address": "Rua A, 123"},
-        )
-
-        assert "user" in result
-        assert "establishment" in result
-
-        user = result["user"]
-        est = result["establishment"]
-
-        assert user.email == "contato@mercado.com"
-        assert user.lead_id == lead.id
-        assert user.check_password("senha123")
-
-        assert est.name == "Mercado Central"
-        assert est.cnpj == "12.345.678/0001-90"
-        assert est.address == "Rua A, 123"
-        assert est.lead_id == lead.id
-
-        # Verifica member
-        member = session.query(EstablishmentMember).filter_by(
-            user_id=user.id, establishment_id=est.id
-        ).first()
-        assert member is not None
-        assert member.role == "owner"
-
-        assert result["lead"].status == LeadStatus.converted
+        with pytest.raises(LeadError, match="approve-market"):
+            convert_lead(lead.id, password="senha123",
+                         establishment_data={"cnpj": "12.345.678/0001-90"})
 
     def test_convert_idempotent_person(self, session):
         """Segunda conversão do mesmo lead person retorna user existente."""
@@ -262,30 +236,6 @@ class TestConvertLead:
 
         assert result1["user"].id == result2["user"].id
         assert result2["user"].check_password("senha123")  # Senha original mantida
-
-    def test_convert_idempotent_establishment(self, session):
-        """Segunda conversão do mesmo lead establishment retorna registros existentes."""
-        lead = create_lead(
-            type=LeadType.establishment,
-            name="Mercado",
-            phone="(19) 98888-0000",
-            email="contato@mercado.com",
-        )
-
-        result1 = convert_lead(
-            lead.id,
-            password="senha123",
-            establishment_data={"cnpj": "12.345.678/0001-90"},
-        )
-        result2 = convert_lead(
-            lead.id,
-            password="outrasenha",
-            establishment_data={"cnpj": "12.345.678/0001-90", "name": "Outro Nome"},
-        )
-
-        assert result1["user"].id == result2["user"].id
-        assert result1["establishment"].id == result2["establishment"].id
-        assert result2["establishment"].name == "Mercado"  # Nome original mantido
 
     def test_convert_person_without_email_raises(self, session):
         """Conversão de person sem email falha."""
@@ -308,47 +258,6 @@ class TestConvertLead:
         )
         with pytest.raises(LeadError, match="Senha é obrigatória"):
             convert_lead(lead.id, password=None)
-
-    def test_convert_establishment_without_cnpj_raises(self, session):
-        """Conversão de establishment sem CNPJ falha."""
-        lead = create_lead(
-            type=LeadType.establishment,
-            name="Mercado",
-            phone="(19) 98888-0000",
-            email="contato@mercado.com",
-        )
-        with pytest.raises(LeadError, match="cnpj.*obrigatório"):
-            convert_lead(lead.id, password="senha123", establishment_data={})
-
-    def test_convert_duplicate_cnpj_reuses_existing(self, session):
-        """CNPJ duplicado na conversão de establishment reusa o estabelecimento existente."""
-        # Cria primeiro establishment
-        lead1 = create_lead(
-            type=LeadType.establishment,
-            name="Mercado 1",
-            phone="(19) 98888-0000",
-            email="contato1@mercado.com",
-        )
-        result1 = convert_lead(lead1.id, password="senha123", establishment_data={"cnpj": "12.345.678/0001-90"})
-
-        # Tenta converter segundo lead com mesmo CNPJ
-        lead2 = create_lead(
-            type=LeadType.establishment,
-            name="Mercado 2",
-            phone="(19) 97777-0000",
-            email="contato2@mercado.com",
-        )
-        result2 = convert_lead(lead2.id, password="senha123", establishment_data={"cnpj": "12.345.678/0001-90"})
-
-        # Deve reusar o mesmo establishment
-        assert result1["establishment"].id == result2["establishment"].id
-        assert result1["establishment"].cnpj == "12.345.678/0001-90"
-        # Leads diferentes mas mesmo establishment
-        assert result1["lead"].id != result2["lead"].id
-        # Usuários diferentes
-        assert result1["user"].id != result2["user"].id
-        # Lead2 deve estar convertido
-        assert result2["lead"].status == LeadStatus.converted
 
     def test_convert_nonexistent_lead_raises(self, session):
         """Conversão de lead inexistente falha."""
@@ -532,6 +441,71 @@ class TestLeadPersistence:
             assert lead is not None
             assert lead.bairro is None
             assert lead.cesta_tipo is None
+
+
+class TestLeadErrorPaths:
+    """
+    Caminhos de erro das rotas.
+
+    Houve um bug em que `erro("internal_error", "...")` era chamado com 2
+    argumentos numa função que exige 3, então o próprio tratamento de erro
+    estourava TypeError e a resposta virava 500 sem o JSON da API. Estes testes
+    travam esse comportamento.
+    """
+
+    def test_commit_quebrado_devolve_500_com_json(self, app, monkeypatch):
+        """Falha inesperada no commit vira 500 no formato {"error": {...}}."""
+        from sqlalchemy.orm import Session
+
+        def commit_quebrado(self):
+            raise RuntimeError("falha simulada no commit")
+
+        monkeypatch.setattr(Session, "commit", commit_quebrado)
+
+        client = app.test_client()
+        response = client.post("/api/leads/cliente", json={
+            "tipo": "cliente",
+            "nome": "Teste",
+            "whatsapp": "(11) 99999-9999",
+            "email": "erro500@exemplo.com",
+            "bairro": "Centro",
+            "cesta": "frutas",
+        })
+
+        assert response.status_code == 500
+        # O corpo tem que ser o JSON da API, não um erro de template/TypeError.
+        assert response.is_json
+        corpo = response.get_json()
+        assert corpo["error"]["code"] == "internal_error"
+        assert corpo["error"]["message"] == "Erro interno no servidor."
+
+        # Nada foi gravado.
+        with app.app_context():
+            db.session.remove()
+            from app.models import Lead
+            assert db.session.query(Lead).count() == 0
+
+    def test_commit_quebrado_no_mercado_devolve_500(self, app, monkeypatch):
+        """Mesma garantia na rota de estabelecimento."""
+        from sqlalchemy.orm import Session
+
+        def commit_quebrado(self):
+            raise RuntimeError("falha simulada no commit")
+
+        monkeypatch.setattr(Session, "commit", commit_quebrado)
+
+        client = app.test_client()
+        response = client.post("/api/leads/mercado", json={
+            "tipo": "mercado",
+            "responsavel": "Maria",
+            "whatsapp": "(11) 98888-8888",
+            "bairro": "Centro",
+            "estabelecimento": "Mercado da Maria",
+            "tipoEstabelecimento": "mercado",
+        })
+
+        assert response.status_code == 500
+        assert response.get_json()["error"]["code"] == "internal_error"
 
 
 class TestLeadRoutes:

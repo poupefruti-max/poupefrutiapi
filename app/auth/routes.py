@@ -9,7 +9,7 @@ from flask_jwt_extended import (
 )
 from sqlalchemy.exc import IntegrityError
 
-from ..extensions import db
+from ..extensions import db, limiter
 from ..models import User
 from ..validators import email_valido, normalizar_email
 
@@ -27,6 +27,27 @@ def _payload() -> dict:
     return data if isinstance(data, dict) else {}
 
 
+def _chave_por_email() -> str:
+    """Limite por e-mail, para travar ataque dirigido a uma conta.
+
+    Complementa o limite por IP: uma miríade de IPs mirando a mesma conta não
+    passa, porque o e-mail vira a chave. O e-mail vem normalizado do corpo,
+    então `Alvo@Test.com ` e `alvo@test.com` caem no mesmo bucket.
+    """
+    dados = request.get_json(silent=True) or {}
+    email = normalizar_email(dados.get("email"))
+    return f"auth-email:{email}" if email else "auth-email:__vazio__"
+
+
+def _chave_por_ip() -> str:
+    """Limite por IP.
+
+    Depende do ProxyFix estar configurado (PROXY_FIX_X_FOR) — atrás do proxy do
+    Render, sem isso o IP é o do proxy e todos compartilham o mesmo bucket.
+    """
+    return f"auth-ip:{request.remote_addr}"
+
+
 # ---------------------------------------------------------------------------
 # POST /api/v1/auth/register
 # ---------------------------------------------------------------------------
@@ -40,10 +61,10 @@ def register():
     min_len = current_app.config["MIN_PASSWORD_LENGTH"]
 
     if not email_valido(email):
-        return erro("invalid_email", "Informe um e-mail válido.", 400)
+        return _erro("invalid_email", "Informe um e-mail válido.", 400)
 
     if not isinstance(password, str) or len(password) < min_len:
-        return erro(
+        return _erro(
             "weak_password",
             f"A senha deve ter ao menos {min_len} caracteres.",
             400,
@@ -58,7 +79,7 @@ def register():
     except IntegrityError:
         # Corrida entre duas requisições com o mesmo e-mail.
         db.session.rollback()
-        return erro("email_already_exists", "Este e-mail já está cadastrado.", 409)
+        return _erro("email_already_exists", "Este e-mail já está cadastrado.", 409)
 
     return (
         jsonify(
@@ -75,6 +96,22 @@ def register():
 # POST /api/v1/auth/login
 # ---------------------------------------------------------------------------
 @auth_bp.post("/login")
+@limiter.limit(
+    lambda: current_app.config["LOGIN_RATE_LIMIT"],
+    key_func=_chave_por_ip,
+    # 429 precisa sair no mesmo formato de erro da API.
+    # O Flask-Limiter passa o limite como argumento; o handler 429 registered
+    # em create_app cobre os demais casos.
+    on_breach=lambda _limite: _erro(
+        "rate_limit_exceeded",
+        "Muitas tentativas de login. Aguarde um pouco e tente de novo.",
+        429,
+    ),
+)
+@limiter.limit(
+    lambda: current_app.config["LOGIN_EMAIL_RATE_LIMIT"],
+    key_func=_chave_por_email,
+)
 def login():
     data = _payload()
 
@@ -82,13 +119,13 @@ def login():
     password = data.get("password") or ""
 
     if not email or not password:
-        return erro("missing_credentials", "Informe e-mail e senha.", 400)
+        return _erro("missing_credentials", "Informe e-mail e senha.", 400)
 
     user = User.query.filter_by(email=email).first()
 
     # Mensagem genérica: não revela se o e-mail existe.
     if user is None or not user.check_password(password):
-        return erro("invalid_credentials", "E-mail ou senha inválidos.", 401)
+        return _erro("invalid_credentials", "E-mail ou senha inválidos.", 401)
 
     token = create_access_token(identity=str(user.id))
 
@@ -109,4 +146,20 @@ def me():
     if user is None:
         return _erro("user_not_found", "Usuário não encontrado.", 404)
 
-    return jsonify({"user": user.to_dict()}), 200
+    # Inclui os mercados do usuário, para o front montar a navegação.
+    dados = user.to_dict_com_estabelecimentos()
+    memberships = []
+    for vinculo in user.memberships:
+        est = vinculo.establishment
+        memberships.append(
+            {
+                "establishment_id": vinculo.establishment_id,
+                "name": est.name if est else None,
+                "slug": est.slug if est else None,
+                "role": vinculo.role.value if vinculo.role else None,
+                "establishment_status": est.status.value if est and est.status else None,
+            }
+        )
+    dados["memberships"] = memberships
+
+    return jsonify({"user": dados}), 200

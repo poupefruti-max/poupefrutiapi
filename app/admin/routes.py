@@ -5,11 +5,10 @@ from io import StringIO
 import csv
 
 from flask import Blueprint, current_app, jsonify, request, make_response
-from flask_jwt_extended import get_jwt_identity
 from sqlalchemy import func, or_, desc
 
 from ..extensions import db
-from ..models import Lead, LeadType, LeadStatus, AdminUser
+from ..models import Lead, LeadType, LeadStatus
 from .decorators import admin_required
 from services.leads import update_lead_status, convert_lead, LeadError, LeadAlreadyConvertedError
 
@@ -57,13 +56,13 @@ def list_leads():
         try:
             query = query.filter(Lead.status == LeadStatus(status))
         except ValueError:
-            return _erro("invalid_status", f"Status inválido: {status}"), 400
+            return _erro("invalid_status", f"Status inválido: {status}", 400)
 
     if lead_type:
         try:
             query = query.filter(Lead.type == LeadType(lead_type))
         except ValueError:
-            return _erro("invalid_type", f"Tipo inválido: {lead_type}"), 400
+            return _erro("invalid_type", f"Tipo inválido: {lead_type}", 400)
 
     if bairro:
         query = query.filter(Lead.bairro.ilike(f"%{bairro}%"))
@@ -190,7 +189,7 @@ def convert_lead_endpoint(lead_id: int):
     except Exception:
         db.session.rollback()
         current_app.logger.exception("Erro ao converter lead")
-        return _erro("internal_error", "Erro interno no servidor."), 500
+        return _erro("internal_error", "Erro interno no servidor.", 500)
 
     response = {"message": "Lead convertido com sucesso!", "lead": result["lead"].to_dict()}
     if "user" in result:

@@ -67,11 +67,11 @@ def _salvar_lead(lead: Lead):
                     "lead": existing.to_dict(),
                 }), 201
         current_app.logger.exception("IntegrityError sem lead existente")
-        return erro("internal_error", "Erro interno no servidor."), 500
+        return erro("internal_error", "Erro interno no servidor.", 500)
     except Exception:
         db.session.rollback()
         current_app.logger.exception("Erro ao salvar lead")
-        return erro("internal_error", "Erro interno no servidor."), 500
+        return erro("internal_error", "Erro interno no servidor.", 500)
 
     return jsonify({
         "message": "Cadastro recebido com sucesso!",
@@ -263,14 +263,14 @@ def converter_lead(lead_id: int):
     except Exception:
         db.session.rollback()
         current_app.logger.exception("Erro ao converter lead")
-        return erro("internal_error", "Erro interno no servidor."), 500
+        return erro("internal_error", "Erro interno no servidor.", 500)
 
     try:
         db.session.commit()
     except Exception:
         db.session.rollback()
         current_app.logger.exception("Erro ao commitar conversão")
-        return erro("internal_error", "Erro interno no servidor."), 500
+        return erro("internal_error", "Erro interno no servidor.", 500)
 
     response = {"message": "Lead convertido com sucesso!", "lead": result["lead"].to_dict()}
     if "user" in result:

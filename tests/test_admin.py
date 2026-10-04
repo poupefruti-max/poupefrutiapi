@@ -386,23 +386,15 @@ class TestAdminConvert:
         assert "user" in data
         assert data["user"]["email"] == "convert@test.com"
 
-    def test_convert_establishment(self, client, admin_token, app):
-        """Converter lead establishment em estabelecimento + usuário."""
+    def test_convert_establishment_is_rejected(self, client, admin_token, app):
+        """Lead de mercado não é convertido por /convert: usa approve-market."""
         lead_id = self._create_lead(app, LeadType.establishment)
         resp = client.post(f"/api/v1/admin/leads/{lead_id}/convert", json={
             "password": "senha123",
-            "establishment": {
-                "cnpj": "12.345.678/0001-90",
-                "name": "Mercado Teste",
-                "address": "Rua Teste, 123"
-            }
+            "establishment": {"cnpj": "12.345.678/0001-90"},
         }, headers={"Authorization": f"Bearer {admin_token}"})
-        assert resp.status_code == 201
-        data = resp.get_json()
-        assert data["lead"]["status"] == "converted"
-        assert "user" in data
-        assert "establishment" in data
-        assert data["establishment"]["cnpj"] == "12.345.678/0001-90"
+        assert resp.status_code == 400
+        assert "approve-market" in resp.get_json()["error"]["message"]
 
     def test_convert_without_password(self, client, admin_token, app):
         """Conversão falha sem senha."""

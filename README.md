@@ -19,12 +19,16 @@ a existir depois que o lead é convertido.
 | ----------------------- | -------------------------------------------------------------- |
 | `leads`                 | Captação. `type` (`person`/`establishment`), `status`, `extra` (JSONB) |
 | `users`                 | Usuário final, com `lead_id` apontando para o lead de origem    |
-| `establishments`        | Estabelecimento, com `lead_id`                                  |
+| `establishments`        | Estabelecimento, com `lead_id`, `slug`, `status`, `phone`, `description`, `opening_hours`, `is_published`. O `cnpj` é **anulável** (o dono informa depois) |
 | `establishment_members` | Vínculo usuário↔estabelecimento com `role` (padrão `owner`)     |
+| `invitations`           | Convites de acesso. Guarda **apenas o SHA-256** do token         |
 | `admin_users`           | Administradores do painel, **sem relação com `users`**          |
 
 `bairro` e `cesta_tipo` são colunas próprias (filtráveis e indexáveis). Os demais
 campos variáveis ficam em `leads.extra` (JSONB).
+
+Papéis e status ficam em `app/rbac.py` (fonte única): `owner`, `manager`,
+`staff`; e `pending`, `active`, `suspended`.
 
 ## Endpoints
 
@@ -49,15 +53,107 @@ O contrato de entrada é o mesmo desde o começo: a landing continua enviando
 
 ### Usuários — prefixo `/api/v1/auth`
 
-| Método | Rota        | Auth | Sucesso | Erros        |
-| ------ | ----------- | ---- | ------- | ------------ |
-| POST   | `/register` | não  | 201     | 400, 409     |
-| POST   | `/login`    | não  | 200     | 400, 401     |
-| GET    | `/me`       | sim  | 200     | 401, 403, 404 |
+Prefixo `/api/v1/auth`
 
-`/me` recusa token de administrador com **403**.
+| Método | Rota        | Auth | Sucesso | Erros                    |
+| ------ | ----------- | ---- | ------- | ------------------------ |
+| POST   | `/register` | não  | 201     | 400, 409                 |
+| POST   | `/login`    | não  | 200     | 400, 401, **429**        |
+| GET    | `/me`       | sim  | 200     | 401, 403, 404            |
 
-### Admin — prefixo `/api/v1/admin`
+O login tem **dois** contadores independentes: um por IP (protege a API) e um
+por e-mail (protege uma conta específica de ataque dirigido). O e-mail vem
+normalizado do corpo, então `Alvo@Test.com ` e `alvo@test.com` caem no mesmo
+contador. Ambos respondem **429** com o JSON da API, nunca HTML.
+
+O `/me` recusa token de administrador com **403**. Para usuário, devolve
+`{ "user": { ... } }` com `memberships` — cada entrada traz `establishment_id`,
+`name`, `slug`, `role` e `establishment_status`, para o front montar a navegação:
+
+```json
+{
+  "user": {
+    "id": 1, "email": "maria@exemplo.com", "name": "Maria",
+    "memberships": [
+      {
+        "establishment_id": 1,
+        "name": "Mercado São José",
+        "slug": "mercado-sao-jose",
+        "role": "owner",
+        "establishment_status": "active"
+      }
+    ]
+  }
+}
+```
+
+### Convites — prefixo `/api/v1/invitations` (público, com rate limit)
+
+| Método | Rota        | Auth  | Sucesso | Erros                          |
+| ------ | ----------- | ----- | ------- | ------------------------------ |
+| POST   | `/validate` | não   | 200     | 400 (`invalid_invitation`), 429 |
+| POST   | `/accept`   | não   | 201     | 400, 409, 429                  |
+
+`POST /validate` com `{ "token": "..." }` → `{ "valid": true, "establishment_name": "...", "role": "owner", "expires_at": "..." }`
+
+`POST /accept` com `{ "token", "name", "email", "password" }` cria o `User`, o
+`EstablishmentMember` com o papel do convite e devolve `access_token` **no mesmo
+formato do login de usuário** (`{ "access_token", "user", ... }`).
+
+Token inválido, expirado, já usado e revogado devolvem **a mesma resposta**
+(`invalid_invitation`), para não revelar se o token existiu.
+
+O aceite é **atômico**: um `UPDATE ... WHERE accepted_at IS NULL AND revoked_at IS NULL AND expires_at > now()`
+com verificação de `rowcount`. Só a transação que marca a linha cria a conta,
+então dois aceites simultâneos geram **uma única conta**.
+
+### Onboarding de mercados
+
+Fluxo: admin aprova → copia o link → manda por WhatsApp → o responsável cria a
+conta e vira `owner`.
+
+```
+POST /api/v1/admin/leads/<id>/approve-market     (admin) -> 201
+POST /api/v1/admin/establishments/<id>/invitations  (admin) -> 201
+GET  /api/v1/admin/establishments                 (admin) -> 200
+GET  /api/v1/admin/establishments/<id>            (admin) -> 200
+```
+
+`approve-market` só aceita lead `establishment` ainda não convertido (senão
+**409**). Numa única transação:
+
+1. cria o `Establishment` com `slug` gerado do nome, `status=pending` e `lead_id`
+2. cria o convite `owner`
+3. marca o lead como `converted`
+
+Resposta:
+
+```json
+{
+  "establishment": { "id": 1, "slug": "mercado-sao-jose", "status": "pending", "cnpj": null },
+  "invitation": { "id": 1, "role": "owner", "status": "pending", "expires_at": "..." },
+  "invite_url": "https://poupefruti.vercel.app/convite#token=...",
+  "expires_at": "...",
+  "whatsapp_message": "Olá, Maria! ...",
+  "aviso": "Guarde este link agora: ele não será exibido novamente."
+}
+```
+
+**O link em claro aparece só nessa resposta.** Para mandar outro (link perdido
+ou expirado), use `POST /establishments/<id>/invitations`, que **revoga** os
+pendentes do mesmo papel.
+
+Detalhes de segurança:
+
+- token gerado com `secrets.token_urlsafe(32)`; no banco fica só o SHA-256
+- o link usa **fragmento** (`#token=`), que não vai para o servidor nem para o `Referer`
+- validade padrão de 7 dias (`services/invitations.py::DIAS_VALIDADE`)
+- `services/invitations.py` não envia e-mail — a troca para o Resend depois é
+  trocar uma função, sem tocar nas rotas
+- `convert_lead` continua existindo, mas **só para lead do tipo `person`**; para
+  mercado ele recusa e aponta para o `approve-market`
+
+### Endpoints admin
 
 | Método | Rota                          | Auth | Descrição                                  |
 | ------ | ----------------------------- | ---- | ------------------------------------------ |
@@ -66,7 +162,11 @@ O contrato de entrada é o mesmo desde o começo: a landing continua enviando
 | GET    | `/api/v1/admin/leads`         | sim  | Listagem com filtros e paginação           |
 | GET    | `/api/v1/admin/leads/<id>`    | sim  | Detalhe do lead                            |
 | PATCH  | `/api/v1/admin/leads/<id>/status` | sim | Alteração de status                     |
-| POST   | `/api/v1/admin/leads/<id>/convert` | sim | Conversão em usuário/estabelecimento |
+| POST   | `/api/v1/admin/leads/<id>/convert` | sim | Conversão em usuário (só `person`)   |
+| POST   | `/api/v1/admin/leads/<id>/approve-market` | sim | Aprova mercado e gera convite (`establishment`) |
+| POST   | `/api/v1/admin/establishments/<id>/invitations` | sim | Novo link de acesso |
+| GET    | `/api/v1/admin/establishments` | sim | Lista mercados com status do convite       |
+| GET    | `/api/v1/admin/establishments/<id>` | sim | Detalhe com membros e convites        |
 | GET    | `/api/v1/admin/stats`         | sim  | Estatísticas                               |
 | GET    | `/api/v1/admin/export`        | sim  | Exportação CSV                             |
 
@@ -76,7 +176,7 @@ filtros): `status`, `type`, `bairro`, `search` (nome/e-mail/telefone), `page`,
 
 Exemplo: `/api/v1/admin/leads?status=new&type=person&search=ana&page=1&per_page=20`
 
-### Aprovação, mapped a partir do enum `status`
+### Aprovação de lead, mapeada a partir do enum `status`
 
 O enum não ganhou valores novos; o painel mapeia ações para os existentes:
 
@@ -109,6 +209,114 @@ O token de admin carrega o claim `role: "admin"` (`additional_claims`).
 - token de admin em rota de usuário → **403**
 - token de usuário comum em rota de admin → **403**
 
+## Painel do mercado (RBAC)
+
+Quem entra no painel do mercado é `User` com vínculo em `establishment_members`.
+A permissão vive num dicionário único em `app/rbac.py` e é **consultada no banco
+a cada requisição** — nada de papel dentro do token. Assim remover ou rebaixar
+alguém vale na hora, com o token que a pessoa já tinha.
+
+| Ação                                | owner | manager | staff |
+| ----------------------------------- | :---: | :-----: | :---: |
+| Ver perfil e equipe                 |  sim  |   sim   |  sim  |
+| Editar perfil                       |  sim  |   sim   |  não  |
+| Publicar / despublicar página       |  sim  |   sim   |  não  |
+| Gerar link para `staff`             |  sim  |   sim   |  não  |
+| Gerar link para `manager`           |  sim  |   não   |  não  |
+| Gerar link para `owner`             |  não  |   não   |  não  |
+| Alterar papel                       |  sim  | só staff|  não  |
+| Remover membro                      |  sim  | só staff|  não  |
+
+Regras adicionais:
+
+- **Ninguém concede papel maior que o próprio**, e a regra vem da própria matriz:
+  um papel é concedível exatamente quando o ator pode *convidar* alguém com ele
+  (`pode_conceder_papel`). Isso garante que o caminho do convite e o da
+  alteração de papel (`PATCH /members/<user_id>`) nunca divirjam.
+
+  | quem atribui | → `owner` | → `manager` | → `staff` |
+  | ------------ | :-------: | :---------: | :-------: |
+  | owner        |    não    |     sim     |    sim    |
+  | manager      |    não    |    **não**  |    sim    |
+  | staff        |    não    |     não     |    não    |
+
+  Ou seja: **manager não promove ninguém a manager.** Só o owner cria manager, e
+  isso vale tanto por convite quanto por alteração de papel.
+- **O último owner não pode ser removido nem rebaixado** (409 `last_owner`). A
+  contagem é feita com `FOR UPDATE` sobre as linhas de owner, para que duas
+  requisições simultâneas não leiam "1 owner" ao mesmo tempo. O SQLite ignora
+  esse lock, então a garantia só vale no PostgreSQL.
+- **`owner` não é concedível por membro nenhum.** Só a administração da plataforma
+  cria owner, pelo fluxo de aprovação do convite.
+- **Quem não é membro recebe 404**, não 403 — não confirmamos a existência de um
+  recurso para quem não tem relação com ele.
+- **Mercado suspenso** some da rota pública e bloqueia as escritas do painel
+  dele; a leitura continua. O admin suspende e reativa.
+
+### Endpoints do painel do mercado
+
+Prefixo `/api/v1/establishments/<id>`, com JWT de **usuário**.
+
+| Método   | Rota                            | Permissão        | Sucesso | Erros                    |
+| -------- | ------------------------------- | ---------------- | ------- | ------------------------ |
+| GET      | `/profile`                      | `ver_perfil`     | 200     | 401, 403, 404            |
+| PATCH    | `/profile`                      | `editar_perfil`  | 200     | 400, 401, 403, 404, 409  |
+| POST     | `/publish`                      | `publicar`       | 200     | 400, 403                 |
+| POST     | `/unpublish`                    | `publicar`       | 200     | 403                      |
+| GET      | `/members`                      | `ver_equipe`     | 200     | 401, 403, 404            |
+| POST     | `/invitations`                  | `convidar_staff` | 201     | 400, 401, 403, 404       |
+| DELETE   | `/invitations/<invitation_id>`   | `convidar_staff` | 200     | 401, 403, 404, 409       |
+| PATCH    | `/members/<user_id>`            | `alterar_papel`  | 200     | 400, 401, 403, 404, 409  |
+| DELETE   | `/members/<user_id>`            | `remover_membro` | 200     | 401, 403, 404, 409       |
+
+O `POST /invitations` recebe `{ "role": "manager" }` ou `{ "role": "staff" }` e
+devolve o `invite_url` **uma única vez**. `GET /members` lista membros e convites
+com status (`pending`, `accepted`, `expired`, `revoked`) — **nunca** o
+`token_hash`. Remover membro apaga o vínculo; o `User` continua existindo.
+
+Publicar exige nome, endereço e telefone preenchidos, e é o momento em que o
+mercado sai de `pending` para `active`.
+
+### Rota pública
+
+| Método | Rota                                        | Auth | Sucesso | Erros   |
+| ------ | ------------------------------------------- | ---- | ------- | ------- |
+| GET    | `/api/v1/public/establishments/<slug>`      | não  | 200     | 404, 429 |
+
+Só responde para mercado **publicado e ativo**, e devolve apenas `name`,
+`description`, `address`, `phone` e `opening_hours`. Nunca CNPJ, `lead`,
+membros, `slug` nem ids internos. Mercado inexistente, não publicado ou
+suspenso devolvem o mesmo 404 — o campo `establishment` tem exatamente 5 chaves,
+e há teste garantindo isso.
+
+### Administração do mercado
+
+| Método | Rota                                             | Auth  | Descrição                  |
+| ------ | ------------------------------------------------ | ----- | -------------------------- |
+| GET    | `/api/v1/admin/establishments`                   | admin | Lista com status do convite |
+| GET    | `/api/v1/admin/establishments/<id>`               | admin | Detalhe, membros e convites |
+| POST   | `/api/v1/admin/establishments/<id>/invitations`   | admin | Gera convite de `owner`     |
+| PATCH  | `/api/v1/admin/establishments/<id>/status`        | admin | Suspende ou reativa         |
+
+`PATCH /api/v1/admin/establishments/<id>/status` com `{"status": "..."}` no
+**corpo JSON** (query string não é lida):
+
+```bash
+curl -X PATCH "$API/api/v1/admin/establishments/1/status" \
+  -H "Authorization: Bearer $ADMIN" \
+  -H 'Content-Type: application/json' \
+  -d '{"status":"suspended"}'
+```
+
+| Valor       | Efeito                                                                 |
+| ----------- | ---------------------------------------------------------------------- |
+| `suspended` | some da rota pública e bloqueia as escritas do painel (leitura continua) |
+| `active`    | reativa; **mantém** o `is_published` que já estava                       |
+| `pending`   | volta ao estado inicial, útil para devolver um recém-aprovado sem apagar dados |
+
+Suspender é decisão da administração e, ao contrário da publicação, **não é
+revertido pelo owner do mercado** — o `POST /publish` recusa mercado suspenso.
+
 ## Formato de erro
 
 ```json
@@ -138,6 +346,15 @@ O token de admin carrega o claim `role: "admin"` (`additional_claims`).
 | `forbidden`              | 403    | token válido sem permissão                    |
 | `method_not_allowed`     | 405    | método não permitido                          |
 | `rate_limit_exceeded`    | 429    | limite de tentativas                          |
+| `insufficient_permissions` | 403  | membro do mercado sem permissão para a ação   |
+| `establishment_suspended` | 403   | escrita bloqueada em mercado suspenso         |
+| `cannot_grant_higher_role` | 403  | tentando conceder papel acima do próprio       |
+| `last_owner`             | 409    | remover ou rebaixar o único dono              |
+| `cnpj_already_used`      | 409    | CNPJ já cadastrado em outro estabelecimento   |
+| `invalid_cnpj`           | 400    | CNPJ com dígito verificador errado            |
+| `incomplete_profile`     | 400    | faltam campos obrigatórios para publicar       |
+| `invalid_role`           | 400    | papel fora de owner/manager/staff             |
+| `invalid_name`           | 400    | nome vazio                                   |
 | `internal_error`         | 500    | falha inesperada                              |
 
 ## Criando o primeiro administrador
@@ -159,9 +376,22 @@ Admin criado com sucesso! ID: 1
 
 Para criar outro, repita o comando. E-mail repetido é recusado.
 
-## Acessando o painel
+## Páginas na Vercel
 
-O painel é uma página estática na Vercel, em `/admin`:
+O front é estático e vive em `ui/`, servido pela Vercel. Cada página tem sua
+entrada em `ui/vercel.json`:
+
+| Rota       | Arquivo             | Para quê                                        |
+| ---------- | ------------------- | ----------------------------------------------- |
+| `/`        | `ui/index.html`     | landing page pública                            |
+| `/admin`   | `ui/admin.html`     | painel de leads (exige login de admin)          |
+| `/convite` | `ui/convite.html`   | criação de conta pelo convite (pública)         |
+| `/painel`  | `ui/painel.html`    | painel do mercado (exige login de usuário)      |
+
+`admin.html` e `convite.html` são `noindex, nofollow`. A URL da API fica na
+constante `API_URL`, no topo do `<script>` de cada página.
+
+### Acessando o painel admin
 
 ```
 https://poupefruti.vercel.app/admin
@@ -172,12 +402,117 @@ https://poupefruti.vercel.app/admin
 3. O token fica em `sessionStorage` (nunca em `localStorage`); em 401/403 o
    painel volta para a tela de login.
 
-O arquivo é `ui/admin.html`, marcado como `noindex, nofollow`. A origem da Vercel
-precisa estar em `CORS_ORIGINS` (já vem `https://poupefruti.vercel.app` como
-padrão).
+A origem da Vercel precisa estar em `CORS_ORIGINS` (já vem
+`https://poupefruti.vercel.app` como padrão).
 
-A URL da API fica na constante `API_URL`, no topo do `<script>` de
-`ui/admin.html`. Em produção use a URL com `-pooler`.
+## Fluxo de onboarding de um mercado
+
+Do clique no admin até a conta criada:
+
+```
+1. ADMIN: aprova o lead
+   POST /api/v1/admin/leads/<id>/approve-market
+   → devolve invite_url (uma única vez), expires_at e a mensagem sugerida
+
+2. ADMIN: copia o link e envia pelo WhatsApp
+   A mensagem sugerida já vem pronta em whatsapp_message.
+   O link é  APP_BASE_URL + "/convite#token=<token>"
+   O painel também tem o botão "Enviar por WhatsApp", que abre o wa.me com a
+   mensagem e o link preenchidos.
+
+3. RESPONSÁVEL: abre o link em /convite
+   A página lê o token de location.hash, apaga o hash da barra de endereço
+   (history.replaceState) e chama POST /api/v1/invitations/validate.
+   - válido   → mostra "Você foi convidado para <mercado> como <papel>"
+   - inválido → mensagem genérica, sem dizer o motivo
+
+4. RESPONSÁVEL: preenche nome, e-mail e senha
+   Validação no cliente (e-mail, tamanho mínimo, confirmação) e de novo no
+   backend. Em caso de sucesso, POST /api/v1/invitations/accept devolve o
+   access_token, guardado em sessionStorage.
+
+5. Tela de sucesso: "Conta criada! Em breve você poderá acessar o painel do
+   seu mercado".
+```
+
+Detalhes que importam:
+
+- o link usa **fragmento** (`#token=`), que não vai para o servidor nem para o
+  `Referer`; a página também declara `<meta name="referrer" content="no-referrer">`
+- o token em claro **não é recuperável** depois: só existe na resposta da
+  aprovação. Se o responsável perder o link, o admin gera outro em
+  `POST /api/v1/admin/establishments/<id>/invitations`
+- token inválido, expirado, usado e revogado devolvem sempre a **mesma** mensagem
+- `APP_BASE_URL` precisa apontar para o domínio certo, senão o convite leva a
+  uma página inexistente
+
+### O que ainda não existe
+
+- Envio do convite por e-mail (Resend). `services/invitations.py` já devolve o
+  link separado da rota, então a integração é uma função nova.
+
+## Painel do mercado (`/painel`)
+
+Onde o dono, gerente e equipe do mercado trabalham. É uma página estática, sem
+framework, que fala com `/api/v1/establishments/*` usando o token guardado em
+`sessionStorage` pelo aceite do convite.
+
+```
+https://poupefruti.vercel.app/painel
+```
+
+Como entra: **tela de login** com e-mail e senha (`POST /api/v1/auth/login`). O
+`access_token` fica em `sessionStorage` e nunca em `localStorage`. Quem chegou
+pelo `/convite` cai no painel direto, porque o aceite do convite já deixou o
+token guardado.
+
+Quem entra sem token válido cai no login. Um **401 em qualquer chamada** (token
+expirado) limpa o `sessionStorage` e volta para o login com o aviso "Sua sessão
+expirada. Entre novamente." O botão **Sair**, no cabeçalho, faz o mesmo de forma
+explícita. Se a conta não estiver ligada a nenhum mercado, a tela explica que é
+preciso falar com o PoupeFruti — quem convida é o admin, pelo fluxo de aprovação.
+
+### O que a tela faz
+
+| Área            | Comportamento                                                        |
+| --------------- | -------------------------------------------------------------------- |
+| Seleção         | com mais de um vínculo, lista os mercados; com um só, abre direto     |
+| Perfil          | nome, CNPJ, endereço, telefone, descrição e horário                  |
+| Publicação      | publicar/despublicar; publicar promove `pending` → `active`          |
+| Equipe          | lista membros com papel e ações por linha                             |
+| Convites        | gera link (uma vez só) e revoga pendentes                            |
+
+### Como a tela reage ao backend
+
+A interface **espelha** o backend para esconder botões inúteis, mas quem decide
+é a API — se a tela mostrar algo que a API recusa, o erro aparece.
+
+- **404 em rota do mercado** significa "não existe **ou** você não tem acesso".
+  O painel não tenta adivinhar qual dos dois é: volta para a seleção de
+  mercados e recarrega os vínculos.
+- **Mercado suspenso** (`status: suspended`): mostra um aviso fixo no topo
+  ("Este mercado está suspenso. Fale com o PoupeFruti."), desabilita os campos
+  e esconde os botões de edição e convite. **A leitura continua** — o perfil e
+  a equipe continuam visíveis.
+- **Ações por papel** (mesma tabela da seção de RBAC):
+
+  | quem         | convida gerente | convida equipe | age sobre |
+  | ------------ | :-------------: | :------------: | --------- |
+  | owner        |      sim       |      sim       | todos     |
+  | manager      |      não       |      sim       | só equipe |
+  | staff        |      não       |      não       | ninguém   |
+
+- **Ninguém atribui `owner` pelo painel.** Só a administração da plataforma cria
+  owner, pelo fluxo de aprovação.
+- **Remover o último owner** devolve 409 `last_owner`; a tela mostra "Não é
+  possível remover ou rebaixar o único dono do estabelecimento."
+- **`is_me: true`** impede oferecer "alterar papel" e "remover" sobre si mesmo —
+  um autopromoção é sempre engano, e o backend só recusaria quando é o último
+  dono. Se o backend recusar mesmo assim, o erro aparece.
+- **Publicar com perfil incompleto** devolve 400 `incomplete_profile` com a lista
+  do que falta; a tela repete a mensagem e marca os campos correspondentes.
+- Papéis aparecem traduzidos: `owner` = dono, `manager` = gerente,
+  `staff` = equipe.
 
 ## Configuração
 
@@ -189,9 +524,44 @@ Copie `.env.example` para `.env` e preencha.
 | `SECRET_KEY`               | produção    | Segredo da aplicação                           |
 | `JWT_SECRET_KEY`           | produção    | Segredo de assinatura do JWT                   |
 | `CORS_ORIGINS`             | sim         | Origens liberadas, separadas por vírgula      |
+| `APP_BASE_URL`             | produção    | Base pública da SPA, usada nos links de convite |
+| `PROXY_FIX_X_FOR`          | produção    | Saltos de proxy à frente do app (Render = `1`) |
+| `LOGIN_RATE_LIMIT`         | não         | Limite de login por IP (padrão `10 per minute;50 per hour`) |
+| `LOGIN_EMAIL_RATE_LIMIT`   | não         | Limite de login por e-mail (padrão `6 per minute;20 per hour`) |
 | `JWT_ACCESS_TOKEN_EXPIRES` | não         | Expiração do token em segundos (padrão 3600)  |
 | `MIN_PASSWORD_LENGTH`      | não         | Tamanho mínimo da senha (padrão 8)             |
 | `FLASK_ENV`                | não         | `development` (padrão) ou `production`         |
+
+### ProxyFix e o rate limit
+
+O limite de login usa o IP como chave. **Atrás de um proxy, `request.remote_addr`
+é o IP do proxy** — sem configurar `ProxyFix`, todas as pessoas cairiam no mesmo
+contador, e uma só pessoa batendo no limite travaria o login de todo mundo.
+
+Por isso o ProxyFix **não vem ligado**: confiar cegamente em `X-Forwarded-For`
+deixaria um cliente falsificar o IP e escapar do limite (ou jogá-lo contra outra
+pessoa). Ligue explicitamente, com a contagem de saltos exata:
+
+| Onde roda                 | `PROXY_FIX_X_FOR` |
+| ------------------------- | ----------------- |
+| Render → app              | `1`               |
+| Render + CDN/proxy extra  | `2`               |
+| Local (sem proxy)         | deixe em `0`      |
+
+`ProductionConfig` **recusa subir** com valor acima de 2, porque a partir dai o app
+passaria a confiar em cabeçalho que o cliente pode forjar.
+
+### Trava de segurança nos testes
+
+`create_app()` sob pytest recusa qualquer banco que não seja SQLite. Existe
+porque um teste já chegou a usar `create_app("development")` — que lê o
+`DATABASE_URL` do `.env` — e o `db.drop_all()` do teardown **apagou as tabelas
+do banco de produção**. A falha agora acontece na criação do app, com mensagem
+clara, antes de qualquer conexão.
+
+`APP_BASE_URL` entra nos links como `APP_BASE_URL + "/convite#token=..."`. Em
+produção aponte para o domínio do painel (ex.: `https://poupefruti.vercel.app`).
+Se ficar errado, o convite aponta para uma página inexistente.
 
 Em `production`, a aplicação recusa subir com segredos que ainda comecem com `dev-`.
 
@@ -251,6 +621,7 @@ Presentes em `migrations/versions/`:
 | 001     | `001_new_data_model.py`              | enums, `citext`, tabelas `users`/`establishments`/`establishment_members`, migração dos leads do formato antigo |
 | 002     | `002_add_bairro_cesta_tipo.py`       | colunas `bairro` e `cesta_tipo` + índices (idempotente) |
 | 003     | `003_create_admin_users.py`          | tabela `admin_users`                                   |
+| 004     | `004_invitations_and_establishment_onboarding.py` | tabela `invitations`; em `establishments`: `slug`, `status`, `phone`, `description`, `opening_hours`, `is_published`; `cnpj` passa a anulável |
 
 ## Testes
 
@@ -264,6 +635,13 @@ python -m pytest tests/ -q
   sessão nova, depois de `db.session.remove()`)
 - `tests/test_admin.py` — login, rate limit, isolamento de tokens, filtros,
   paginação, transições, stats, CSV e exigência de admin no `/convert`
+- `tests/test_marketplace.py` — aprovação, slug e colisão, token em claro não
+  persistido, aceite atômico, revogação, respostas genéricas, rate limit e
+  autorização
+- `tests/test_rbac.py` — matriz de permissões, escalada de privilégio por papel
+  (incluindo manager tentando promover a manager), isolamento entre mercados
+  (404), efeito imediato de remoção/rebaixamento, regra do último owner com
+  `FOR UPDATE`, suspensão e vazamento de dados na rota pública
 
 ## Exemplos com curl
 
@@ -310,6 +688,40 @@ curl -i http://localhost:5000/api/v1/auth/me \
   -H "Authorization: Bearer $ADMIN"
 ```
 
+### Onboarding de mercados
+
+```bash
+# Aprovar lead de mercado (201) — devolve o link UMA única vez
+LINK=$(curl -s -X POST http://localhost:5000/api/v1/admin/leads/2/approve-market \
+  -H "Authorization: Bearer $ADMIN" | python3 -c 'import sys,json;print(json.load(sys.stdin)["invite_url"])')
+
+TOKEN=${LINK#*#token=}
+echo "$LINK"
+
+# Conferir o token (200)
+curl -s -X POST http://localhost:5000/api/v1/invitations/validate \
+  -H 'Content-Type: application/json' -d "{\"token\":\"$TOKEN\"}"
+
+# Responsável cria a conta (201) e já recebe access_token
+curl -i -X POST http://localhost:5000/api/v1/invitations/accept \
+  -H 'Content-Type: application/json' \
+  -d "{\"token\":\"$TOKEN\",\"name\":\"Maria Souza\",\"email\":\"maria@exemplo.com\",\"password\":\"senha1234\"}"
+
+# Rejeitar (400 invalid_invitation) — o mesmo corpo para token usado/expirado/revogado
+curl -i -X POST http://localhost:5000/api/v1/invitations/accept \
+  -H 'Content-Type: application/json' \
+  -d "{\"token\":\"$TOKEN\",\"name\":\"X\",\"email\":\"x@exemplo.com\",\"password\":\"senha1234\"}"
+
+# Gerar novo link, revogando o pendente (201)
+curl -i -X POST http://localhost:5000/api/v1/admin/establishments/1/invitations \
+  -H "Authorization: Bearer $ADMIN" \
+  -H 'Content-Type: application/json' -d '{"role":"owner"}'
+
+# Ver convite e membros (200)
+curl -i http://localhost:5000/api/v1/admin/establishments/1 \
+  -H "Authorization: Bearer $ADMIN"
+```
+
 ## Notas de segurança
 
 - Senhas nunca são gravadas em texto puro: os models só armazenam `password_hash`
@@ -324,3 +736,9 @@ curl -i http://localhost:5000/api/v1/auth/me \
   `=`, `+`, `-` ou `@` são prefixadas com `'`.
 - Erros de JWT, de HTTP e do limitador passam pelo mesmo serializador
   `{"error": {...}}`.
+- Convites: só o SHA-256 do token é guardado; o valor em claro existe apenas no
+  retorno da criação. O link usa fragmento (`#token=`), que não vai para o
+  servidor nem para o `Referer`. Novo convite revoga os pendentes do mesmo papel.
+- O aceite do convite é atômico (UPDATE condicional + `rowcount`), então dois
+  aceites simultâneos criam uma única conta.
+- Taxas no público: `validate` 30/min, `accept` 10/min, login de admin 5/min.

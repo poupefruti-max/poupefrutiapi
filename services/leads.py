@@ -7,7 +7,7 @@ from typing import Optional
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
-from app.models import Lead, LeadType, LeadStatus, User, Establishment, EstablishmentMember
+from app.models import Lead, LeadType, LeadStatus, User
 from app.extensions import db
 
 logger = logging.getLogger(__name__)
@@ -167,19 +167,26 @@ def convert_lead(
     session: Optional[Session] = None,
 ) -> dict:
     """
-    Converte um lead em usuário e/ou estabelecimento.
-    
-    Operação atômica em uma única transação:
-    - Se lead.type == person: cria User, vincula lead_id, atualiza lead para converted
-    - Se lead.type == establishment: cria Establishment, cria User (owner), cria EstablishmentMember, vincula FKs, atualiza lead
-    
-    Idempotente: se lead já convertido, retorna registros existentes sem duplicar.
+    Converte um lead do tipo **person** em User.
+
+    Operação atômica em uma única transação: cria o User, vincula `lead_id` e
+    marca o lead como `converted`.
+
+    Leads do tipo `establishment` NÃO passam por aqui: o onboarding do mercado
+    é o fluxo `POST /api/v1/admin/leads/<id>/approve-market`, que cria o
+    estabelecimento e emite um convite para o dono criar a própria conta.
     """
     sess = session or db.session
-    
+
     lead = sess.get(Lead, lead_id)
     if not lead:
         raise LeadError(f"Lead {lead_id} não encontrado")
+
+    if lead.type == LeadType.establishment:
+        raise LeadError(
+            "Para lead de mercado use a aprovação em "
+            "/api/v1/admin/leads/<id>/approve-market, que gera o convite de acesso."
+        )
 
     # Idempotência: se já convertido, retorna existentes
     if lead.status == LeadStatus.converted:
@@ -193,10 +200,8 @@ def convert_lead(
 
     if lead.type == LeadType.person:
         return _convert_person(lead, password, sess)
-    elif lead.type == LeadType.establishment:
-        return _convert_establishment(lead, password, establishment_data, sess)
-    else:
-        raise LeadError(f"Tipo de lead desconhecido: {lead.type}")
+
+    raise LeadError(f"Tipo de lead desconhecido: {lead.type}")
 
 
 def _convert_person(lead: Lead, password: Optional[str], sess: Session) -> dict:
@@ -231,82 +236,3 @@ def _convert_person(lead: Lead, password: Optional[str], sess: Session) -> dict:
     lead.converted_at = datetime.utcnow()
 
     return {"lead": lead, "user": user}
-
-
-def _convert_establishment(
-    lead: Lead,
-    password: Optional[str],
-    establishment_data: Optional[dict],
-    sess: Session,
-) -> dict:
-    """Converte lead do tipo establishment em Establishment + User + Member."""
-    if not lead.email:
-        raise LeadError("Lead establishment precisa de email para conversão")
-    if not password:
-        raise LeadError("Senha é obrigatória para criar usuário owner")
-    if not establishment_data or not establishment_data.get("cnpj"):
-        raise LeadError("Dados do estabelecimento (cnpj) são obrigatórios")
-
-    cnpj = establishment_data["cnpj"].strip()
-    est_name = establishment_data.get("name") or lead.name
-    address = establishment_data.get("address")
-
-    # Verifica se establishment com esse CNPJ já existe
-    establishment = sess.query(Establishment).filter(Establishment.cnpj == cnpj).first()
-    if establishment:
-        # Se já existe, verifica se já tem lead vinculado
-        if establishment.lead_id is None:
-            establishment.lead_id = lead.id
-        
-        # Busca ou cria o user owner
-        user = sess.query(User).filter(User.email == lead.email).first()
-        if not user:
-            user = User(email=lead.email, name=lead.name, lead_id=lead.id)
-            user.set_password(password)
-            sess.add(user)
-            sess.flush()
-        elif user.lead_id is None:
-            user.lead_id = lead.id
-        
-        # Verifica se já é membro
-        member = sess.query(EstablishmentMember).filter(
-            EstablishmentMember.user_id == user.id,
-            EstablishmentMember.establishment_id == establishment.id
-        ).first()
-        if not member:
-            member = EstablishmentMember(user_id=user.id, establishment_id=establishment.id, role="owner")
-            sess.add(member)
-
-        lead.status = LeadStatus.converted
-        lead.converted_at = datetime.utcnow()
-        sess.flush()
-        return {"lead": lead, "user": user, "establishment": establishment}
-
-    # Cria establishment
-    establishment = Establishment(
-        name=est_name,
-        cnpj=cnpj,
-        address=address,
-        lead_id=lead.id,
-    )
-    sess.add(establishment)
-    sess.flush()
-
-    # Cria user owner
-    user = sess.query(User).filter(User.email == lead.email).first()
-    if not user:
-        user = User(email=lead.email, name=lead.name, lead_id=lead.id)
-        user.set_password(password)
-        sess.add(user)
-        sess.flush()
-    elif user.lead_id is None:
-        user.lead_id = lead.id
-
-    # Cria vínculo member
-    member = EstablishmentMember(user_id=user.id, establishment_id=establishment.id, role="owner")
-    sess.add(member)
-
-    lead.status = LeadStatus.converted
-    lead.converted_at = datetime.utcnow()
-
-    return {"lead": lead, "user": user, "establishment": establishment}

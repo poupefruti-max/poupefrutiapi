@@ -1,12 +1,11 @@
 """Blueprint de autenticação do admin: /api/v1/admin/auth."""
 
 from flask import Blueprint, current_app, jsonify, request
-from flask_jwt_extended import create_access_token, get_jwt_identity, jwt_required
-from sqlalchemy.exc import IntegrityError
+from flask_jwt_extended import create_access_token, get_jwt_identity
 
 from ..extensions import db, limiter
 from ..models import AdminUser
-from ..validators import email_valido, normalizar_email
+from ..validators import normalizar_email
 from .decorators import admin_required
 
 admin_auth_bp = Blueprint("admin_auth", __name__, url_prefix="/api/v1/admin/auth")

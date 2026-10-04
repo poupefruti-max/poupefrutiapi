@@ -3,7 +3,6 @@
 import bcrypt
 import enum
 import json
-from datetime import datetime
 from sqlalchemy import (
     Boolean,
     CheckConstraint,
@@ -19,6 +18,7 @@ from sqlalchemy.dialects.postgresql import CITEXT, JSONB
 
 from .extensions import db
 from .rbac import EstablishmentStatus, MemberRole
+from .timeutils import como_utc, agora_utc
 
 
 class CITEXTType(TypeDecorator):
@@ -311,10 +311,15 @@ class Invitation(db.Model):
     )
 
     def esta_pendente(self, agora=None) -> bool:
-        """True quando o convite ainda pode ser usado."""
+        """
+        True quando o convite ainda pode ser usado.
+
+        Normaliza os dois lados: `expires_at` vem com fuso do PostgreSQL e sem
+        fuso do SQLite, e `agora` precisa ser comparável aos dois.
+        """
         if self.accepted_at is not None or self.revoked_at is not None:
             return False
-        return self.expires_at > (agora or datetime.utcnow())
+        return como_utc(self.expires_at) > como_utc(agora or agora_utc())
 
     def to_dict(self) -> dict:
         return {

@@ -41,7 +41,9 @@ def upgrade() -> None:
 
     novas = [
         ("slug", sa.String(160)),
-        ("status", sa.String(7)),
+        # 9, não 7: 'suspended' tem 9 letras e precisa caber. Um VARCHAR(7)
+        # quebraria ao suspender um mercado.
+        ("status", sa.String(9)),
         ("phone", sa.String(20)),
         ("description", sa.Text()),
         ("opening_hours", sa.Text()),
@@ -56,7 +58,7 @@ def upgrade() -> None:
     op.alter_column(
         "establishments",
         "status",
-        existing_type=sa.String(7),
+        existing_type=sa.String(9),
         nullable=False,
         server_default=sa.text("'pending'"),
     )

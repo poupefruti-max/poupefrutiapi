@@ -8,6 +8,7 @@ from sqlalchemy import (
     CheckConstraint,
     DateTime,
     Enum,
+    Index,
     String,
     Text,
     TypeDecorator,
@@ -17,7 +18,7 @@ from sqlalchemy import (
 from sqlalchemy.dialects.postgresql import CITEXT, JSONB
 
 from .extensions import db
-from .rbac import EstablishmentStatus, MemberRole
+from .rbac import BasketStatus, BasketType, EstablishmentStatus, MemberRole
 from .timeutils import como_utc, agora_utc
 
 
@@ -221,6 +222,9 @@ class Establishment(db.Model):
         index=True,
     )
     phone = db.Column(db.String(20), nullable=True)
+    # `description` saiu do perfil (virou área de CESTAS, tabela `baskets`).
+    # A coluna continua no banco de propósito: nada é apagado aqui, e a
+    # remoção física fica para uma etapa posterior com backup.
     description = db.Column(db.Text, nullable=True)
     opening_hours = db.Column(db.Text, nullable=True)
     is_published = db.Column(Boolean, nullable=False, default=False, server_default=text("false"))
@@ -228,6 +232,9 @@ class Establishment(db.Model):
 
     lead = db.relationship("Lead", back_populates="establishment", foreign_keys="Establishment.lead_id")
     members = db.relationship("EstablishmentMember", back_populates="establishment", cascade="all, delete-orphan")
+    baskets = db.relationship(
+        "Basket", back_populates="establishment", cascade="all, delete-orphan"
+    )
     invitations = db.relationship(
         "Invitation",
         back_populates="establishment",
@@ -236,6 +243,7 @@ class Establishment(db.Model):
     )
 
     def to_dict(self) -> dict:
+        """Perfil visto pelo painel do mercado (cnpj incluso: é do dono)."""
         return {
             "id": self.id,
             "lead_id": self.lead_id,
@@ -245,7 +253,6 @@ class Establishment(db.Model):
             "slug": self.slug,
             "status": self.status.value if self.status else None,
             "phone": self.phone,
-            "description": self.description,
             "opening_hours": self.opening_hours,
             "is_published": self.is_published,
             "created_at": self.created_at.isoformat() if self.created_at else None,
@@ -363,3 +370,138 @@ class EstablishmentMember(db.Model):
 
     def __repr__(self) -> str:
         return f"<EstablishmentMember user={self.user_id} est={self.establishment_id} role={self.role}>"
+
+
+class Basket(db.Model):
+    """
+    Cesta da sobra do dia (frutas ou legumes) com desconto, para retirada.
+
+    Ainda não há pedidos nem pagamento: a cesta é só a oferta e o estoque.
+    Por isso não existe DELETE — encerrar é `status = closed`, que é o que
+    preservará o histórico quando os pedidos passarem a referenciar a cesta.
+    """
+
+    __tablename__ = "baskets"
+
+    id = db.Column(db.Integer, primary_key=True)
+    establishment_id = db.Column(
+        db.Integer,
+        db.ForeignKey("establishments.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    type = db.Column(Enum(BasketType, native_enum=False), nullable=False)
+    name = db.Column(String(80), nullable=True)
+    weight_grams = db.Column(db.Integer, nullable=False)
+    price_cents = db.Column(db.Integer, nullable=False)
+    retail_value_cents = db.Column(db.Integer, nullable=True)
+    quantity = db.Column(db.Integer, nullable=False, server_default=text("0"))
+    pickup_starts_at = db.Column(DateTime(timezone=True), nullable=False)
+    pickup_ends_at = db.Column(DateTime(timezone=True), nullable=False, index=True)
+    notes = db.Column(String(280), nullable=True)
+    status = db.Column(
+        Enum(BasketStatus, native_enum=False),
+        nullable=False,
+        default=BasketStatus.active,
+        server_default=text("'active'"),
+    )
+    created_by_user_id = db.Column(
+        db.Integer, db.ForeignKey("users.id", ondelete="SET NULL"), nullable=True
+    )
+    created_at = db.Column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    updated_at = db.Column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+        onupdate=func.now(),
+    )
+
+    establishment = db.relationship("Establishment", back_populates="baskets")
+    created_by_user = db.relationship("User", foreign_keys=[created_by_user_id])
+
+    __table_args__ = (
+        CheckConstraint("price_cents > 0", name="ck_baskets_price_positive"),
+        CheckConstraint("quantity >= 0", name="ck_baskets_quantity_non_negative"),
+        CheckConstraint("weight_grams > 0", name="ck_baskets_weight_positive"),
+        CheckConstraint(
+            "pickup_ends_at > pickup_starts_at",
+            name="ck_baskets_pickup_window",
+        ),
+        # Leitura do painel: mercado + status.
+        Index("ix_baskets_establishment_status", "establishment_id", "status"),
+    )
+
+    @property
+    def discount_percent(self):
+        """
+        Desconto em % sobre o preço de vitrine.
+
+        Devolve None quando não há valor de referência, ou quando ele não é
+        maior que o preço — a validação impede gravar assim, mas a property
+        não deve explodir ao ler uma linha.
+        """
+        if not self.retail_value_cents or self.retail_value_cents <= 0:
+            return None
+        if self.retail_value_cents <= self.price_cents:
+            return None
+        return round(
+            (self.retail_value_cents - self.price_cents) * 100.0
+            / self.retail_value_cents,
+            1,
+        )
+
+    def to_dict(self) -> dict:
+        """Cesta como o painel do mercado vê (inclui ids internos)."""
+        return {
+            "id": self.id,
+            "establishment_id": self.establishment_id,
+            "type": self.type.value if self.type else None,
+            "name": self.name,
+            "weight_grams": self.weight_grams,
+            "price_cents": self.price_cents,
+            "retail_value_cents": self.retail_value_cents,
+            "discount_percent": self.discount_percent,
+            "quantity": self.quantity,
+            "pickup_starts_at": como_utc(self.pickup_starts_at).isoformat()
+            if self.pickup_starts_at
+            else None,
+            "pickup_ends_at": como_utc(self.pickup_ends_at).isoformat()
+            if self.pickup_ends_at
+            else None,
+            "notes": self.notes,
+            "status": self.status.value if self.status else None,
+            "created_by_user_id": self.created_by_user_id,
+            "created_at": como_utc(self.created_at).isoformat()
+            if self.created_at
+            else None,
+            "updated_at": como_utc(self.updated_at).isoformat()
+            if self.updated_at
+            else None,
+        }
+
+    def to_dict_publico(self) -> dict:
+        """
+        Cesta como o visitante vê na página pública.
+
+        NÃO inclui: id, establishment_id, created_by_user_id, status interno.
+        Só o que alguém que quer retirar precisa saber.
+        """
+        return {
+            "type": self.type.value if self.type else None,
+            "name": self.name,
+            "weight_grams": self.weight_grams,
+            "price_cents": self.price_cents,
+            "retail_value_cents": self.retail_value_cents,
+            "discount_percent": self.discount_percent,
+            "quantity": self.quantity,
+            "pickup_starts_at": como_utc(self.pickup_starts_at).isoformat()
+            if self.pickup_starts_at
+            else None,
+            "pickup_ends_at": como_utc(self.pickup_ends_at).isoformat()
+            if self.pickup_ends_at
+            else None,
+            "notes": self.notes,
+        }
+
+    def __repr__(self) -> str:
+        return f"<Basket est={self.establishment_id} type={self.type} qty={self.quantity}>"

@@ -20,8 +20,8 @@ from sqlalchemy.schema import CreateTable
 
 from app import create_app
 from app.extensions import db
-from app.models import Establishment, Invitation, Lead, LeadStatus
-from app.rbac import EstablishmentStatus, MemberRole
+from app.models import Basket, Establishment, Invitation, Lead, LeadStatus
+from app.rbac import BasketStatus, BasketType, EstablishmentStatus, MemberRole
 
 DIALECT = postgresql.dialect()
 
@@ -32,6 +32,8 @@ COLUNAS_DE_ENUM = [
     ("establishments.status", Establishment.__table__.c.status, EstablishmentStatus),
     ("invitations.role", Invitation.__table__.c.role, MemberRole),
     ("leads.status", Lead.__table__.c.status, LeadStatus),
+    ("baskets.type", Basket.__table__.c.type, BasketType),
+    ("baskets.status", Basket.__table__.c.status, BasketStatus),
 ]
 
 
@@ -88,8 +90,38 @@ class TestTamanhoDaColunaDeEnum:
             tipo = coluna.type
             assert tipo.native_enum is False, (
                 f"{rotulo}: native_enum=True criaria um tipo ENUM no banco, "
-                "e a migração 001/004 assume VARCHAR"
+                "e a migração 001/004/005 assume VARCHAR"
             )
+
+    def test_baskets_tem_todo_o_que_a_migracao_005_declara(self):
+        """Trava o contrato da tabela nova contra a migração 005."""
+        tabela = Basket.__table__
+
+        esperados = [
+            "id", "establishment_id", "type", "name", "weight_grams",
+            "price_cents", "retail_value_cents", "quantity",
+            "pickup_starts_at", "pickup_ends_at", "notes", "status",
+            "created_by_user_id", "created_at", "updated_at",
+        ]
+        assert list(tabela.columns.keys()) == esperados, list(tabela.columns.keys())
+
+        checks = {c.name for c in tabela.constraints
+                  if c.__class__.__name__ == "CheckConstraint"}
+        assert checks == {
+            "ck_baskets_price_positive",
+            "ck_baskets_quantity_non_negative",
+            "ck_baskets_weight_positive",
+            "ck_baskets_pickup_window",
+        }, checks
+
+        assert tabela.c.quantity.server_default is not None
+        assert tabela.c.status.server_default is not None
+        assert tabela.c.created_at.server_default is not None
+        assert tabela.c.updated_at.server_default is not None
+        # name e notes são opcionais
+        assert tabela.c.name.nullable is True
+        assert tabela.c.notes.nullable is True
+        assert tabela.c.retail_value_cents.nullable is True
 
 
 class TestMigracao004NaoDivergirDoModel:

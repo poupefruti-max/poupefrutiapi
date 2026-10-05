@@ -154,6 +154,12 @@ def membro_de_outro(app, client):
 
 class TestMatriz:
     def test_matriz_batem_com_a_especificacao(self):
+        """
+        A matriz é comparada por chave, não por igualdade: a área de cestas
+        cresceu e pode ganhar novas ações depois. O que não pode passar é uma
+        permissão de cestas sobrando para `staff`.
+        """
+        # --- as permissões que já existiam, com os mesmos papéis ---
         esperado = {
             "ver_perfil":       {"owner", "manager", "staff"},
             "ver_equipe":       {"owner", "manager", "staff"},
@@ -165,7 +171,43 @@ class TestMatriz:
             "alterar_papel":    {"owner", "manager"},
             "remover_membro":   {"owner", "manager"},
         }
-        assert PERMISSOES == esperado
+
+        for acao, papeis in esperado.items():
+            assert acao in PERMISSOES, f"permissão {acao} sumiu da matriz"
+            assert PERMISSOES[acao] == papeis, (
+                f"{acao}: esperado {sorted(papeis)}, "
+                f"veio {sorted(PERMISSOES[acao])}"
+            )
+
+        # --- cestas ---
+        cestas = {
+            "ver_cestas":      {"owner", "manager", "staff"},
+            "gerenciar_cestas": {"owner", "manager"},
+            "ajustar_estoque": {"owner", "manager", "staff"},
+        }
+        for acao, papeis in cestas.items():
+            assert acao in PERMISSOES, f"permissão {acao} sumiu da matriz"
+            assert PERMISSOES[acao] == papeis, (
+                f"{acao}: esperado {sorted(papeis)}, "
+                f"veio {sorted(PERMISSOES[acao])}"
+            )
+
+        # Staff ajusta estoque, mas nunca gerencia a oferta.
+        assert "staff" in PERMISSOES["ajustar_estoque"]
+        assert "staff" not in PERMISSOES["gerenciar_cestas"]
+
+    def test_matriz_nao_tem_chave_desconhecida(self):
+        """Nenhuma permissão órfã na matriz."""
+        acoes = {
+            "ver_perfil", "ver_equipe", "ver_cestas",
+            "editar_perfil", "publicar",
+            "gerenciar_cestas", "ajustar_estoque",
+            "convidar_staff", "convidar_manager", "convidar_owner",
+            "alterar_papel", "remover_membro",
+        }
+        assert set(PERMISSOES) == acoes, (
+            f"diferença: {set(PERMISSOES) ^ acoes}"
+        )
 
     def test_ninguem_concede_owner(self):
         for papel in ("owner", "manager", "staff"):
@@ -228,9 +270,23 @@ class TestPerfil:
         assert resp.get_json()["error"]["code"] == "cnpj_already_used"
 
     def test_texto_e_limitado(self, owner):
-        resp = _patch(owner, "/profile", {"description": "x" * 5000})
+        """Os textos do perfil são aparados e limitados."""
+        resp = _patch(owner, "/profile", {"opening_hours": "x" * 5000})
         assert resp.status_code == 200
-        assert len(resp.get_json()["establishment"]["description"]) == 2000
+        assert len(resp.get_json()["establishment"]["opening_hours"]) == 300
+
+    def test_description_saiu_do_perfil(self, owner):
+        """
+        `description` foi substituído pela área de cestas: o perfil não grava
+        nem devolve mais esse campo.
+        """
+        resp = _patch(owner, "/profile", {"description": "texto antigo"})
+        assert resp.status_code == 200
+        assert "description" not in resp.get_json()["establishment"]
+
+    def test_perfil_nao_expoe_description(self, owner):
+        resp = _get(owner, "/profile")
+        assert "description" not in resp.get_json()["establishment"]
 
     def test_nome_vazio_recusado(self, owner):
         resp = _patch(owner, "/profile", {"name": "   "})
@@ -790,8 +846,8 @@ class TestSuspensao:
 class TestRotaPublica:
     def _publicar(self, owner):
         _patch(owner, "/profile", {
-            "name": "Mercado", "address": "Rua A, 1", "phone": "19988880000",
-            "description": "Bom lugar", "opening_hours": "Seg a Sex, 8-18",
+            "name": "Mercado", "address": "Rua A, 1", "phone": "19999990000",
+            "opening_hours": "Seg a Sex, 8-18",
         })
         _post(owner, "/publish")
 
@@ -805,10 +861,15 @@ class TestRotaPublica:
         assert resp.status_code == 200
         est = resp.get_json()["establishment"]
         assert est["name"] == "Mercado"
-        assert est["description"] == "Bom lugar"
         assert est["address"] == "Rua A, 1"
-        assert est["phone"] == "19988880000"
+        assert est["phone"] == "19999990000"
         assert est["opening_hours"] == "Seg a Sex, 8-18"
+
+    def test_publicado_tem_lista_de_cestas(self, owner):
+        """A área de cestas entrou no lugar da description."""
+        self._publicar(owner)
+        resp = _CLIENT.get(f"/api/v1/public/establishments/{owner['slug']}")
+        assert resp.get_json()["establishment"]["baskets"] == []
 
     def test_nao_vaza_cnpj(self, owner):
         _patch(owner, "/profile", {"cnpj": "11.222.333/0001-81"})
@@ -823,10 +884,16 @@ class TestRotaPublica:
         self._publicar(owner)
         resp = _CLIENT.get(f"/api/v1/public/establishments/{owner['slug']}")
         dados = resp.get_json()["establishment"]
-        # Só os campos públicos, nada de id/lead/members/slug.
+        # Só os campos públicos + a lista de cestas. Nada de id/lead/members/
+        # slug/cnpj/description.
         assert set(dados.keys()) == {
-            "name", "description", "address", "phone", "opening_hours"
-        }
+            "name", "address", "phone", "opening_hours", "baskets"
+        }, set(dados.keys())
+
+    def test_description_sumiu_da_rota_publica(self, owner):
+        self._publicar(owner)
+        resp = _CLIENT.get(f"/api/v1/public/establishments/{owner['slug']}")
+        assert "description" not in resp.get_json()["establishment"]
 
     def test_slug_inexistente_404(self, client):
         assert _CLIENT.get("/api/v1/public/establishments/nao-existe").status_code == 404

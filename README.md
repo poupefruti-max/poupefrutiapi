@@ -19,7 +19,7 @@ a existir depois que o lead é convertido.
 | ----------------------- | -------------------------------------------------------------- |
 | `leads`                 | Captação. `type` (`person`/`establishment`), `status`, `extra` (JSONB) |
 | `users`                 | Usuário final, com `lead_id` apontando para o lead de origem    |
-| `establishments`        | Estabelecimento, com `lead_id`, `slug`, `status`, `phone`, `description`, `opening_hours`, `is_published`. O `cnpj` é **anulável** (o dono informa depois) |
+| `establishments`        | Estabelecimento, com `lead_id`, `slug`, `status`, `phone`, `bairro`, `description`, `opening_hours`, `is_published`. O `cnpj` é **anulável** (o dono informa depois) |
 | `establishment_members` | Vínculo usuário↔estabelecimento com `role` (padrão `owner`)     |
 | `baskets`               | Cestas da sobra do dia (frutas/legumes) com desconto e estoque           |
 | `invitations`           | Convites de acesso. Guarda **apenas o SHA-256** do token         |
@@ -27,6 +27,42 @@ a existir depois que o lead é convertido.
 
 `bairro` e `cesta_tipo` são colunas próprias (filtráveis e indexáveis). Os demais
 campos variáveis ficam em `leads.extra` (JSONB).
+
+`establishments.bairro` (VARCHAR 80, anulável, indexado) é o bairro do **mercado**
+— diferente de `leads.bairro`, que é o bairro de quem se cadastrou. Sem ele o
+mercado não pode ser publicado e não entra em nenhuma contagem por bairro.
+
+### Bairros de Campinas — lista única
+
+A lista de bairros do projeto está em **`app/validators.py`, `VALORES_BAIRRO`**,
+e é a única fonte:
+
+- os dois `<select>` do formulário da landing mostram exatamente esses valores,
+  na mesma ordem;
+- o `<select>` de bairro do painel monta as opções a partir do que o
+  `GET /profile` devolve no campo `bairros` — o HTML não guarda cópia nenhuma;
+- o perfil do mercado e a rota `/public/stats` validam contra a lista.
+
+Antes havia duas listas divergentes dentro de `index.html`: a do formulário de
+cliente tinha `Jardim(ns) Guanabara`, `Jardim(ns) Paulistano` e `Jardim(ns)
+Chapada`, e a de mercado não. Isso fazia o mesmo bairro virar dois valores
+diferentes no banco.
+
+O último item é `Bairro não listado`: a porta de escape para quem mora num
+bairro que não está na lista. Ele conta como valor válido (aparece no `<select>`,
+passa na validação, dá para publicar e é filtrável em `/public/stats`). Fica por
+último de propósito: é a opção para quem não se reconhece na lista, não uma
+recomendação.
+
+> **Não renomeie bairros já gravados.** `Jardim(ns) Guanabara` continua escrito
+> assim, mesmo com a grafia feia: mudar o texto quebraria a contagem por bairro
+> de quem já está no banco. Para corrigir um bairro, acrescente o valor novo ao
+> lado do antigo e migre os dados em um script à parte.
+
+`POST /api/leads/cliente` e `/mercado` **não** recusam bairro fora da lista (o
+banco já tem valores assim, e recusar faria a pessoa escolher um bairro errado
+só para passar na validação). O que elas fazem é gravar o texto canônico quando
+o bairro é um valor da lista: `"centro"` vira `"Centro"`.
 
 Papéis e status ficam em `app/rbac.py` (fonte única): `owner`, `manager`,
 `staff`; e `pending`, `active`, `suspended`. Os enums de cesta também:
@@ -283,20 +319,86 @@ devolve o `invite_url` **uma única vez**. `GET /members` lista membros e convit
 com status (`pending`, `accepted`, `expired`, `revoked`) — **nunca** o
 `token_hash`. Remover membro apaga o vínculo; o `User` continua existindo.
 
-Publicar exige nome, endereço e telefone preenchidos, e é o momento em que o
-mercado sai de `pending` para `active`.
+Publicar exige **nome, endereço, telefone e bairro** preenchidos, e é o momento
+em que o mercado sai de `pending` para `active`. O bairro entra na lista de
+obrigatórios porque é ele que permite a pessoa ver as cestas do mercado no filtro
+por bairro da landing: publicado sem bairro, o mercado não contaria em lugar
+nenhum.
+
+### `bairro` no perfil
+
+`GET /profile` devolve o `bairro` do mercado e, no mesmo corpo, a lista
+canônica no campo `bairros` (o painel monta o `<select>` a partir dela, sem
+guardar cópia no HTML).
+
+`PATCH /profile` aceita `bairro`:
+
+| Valor enviado        | Resultado                                    |
+| -------------------- | -------------------------------------------- |
+| `"Centro"`, `"centro"`, `"  centro  "` | grava `"Centro"` (texto canônico) |
+| valor fora da lista  | 400 `invalid_bairro`                         |
+| `""`                 | limpa o campo (volta a ser nulo)              |
 
 ### Rota pública
 
-| Método | Rota                                        | Auth | Sucesso | Erros   |
-| ------ | ------------------------------------------- | ---- | ------- | ------- |
-| GET    | `/api/v1/public/establishments/<slug>`      | não  | 200     | 404, 429 |
+| Método | Rota                                        | Auth | Sucesso | Erros        |
+| ------ | ------------------------------------------- | ---- | ------- | ------------ |
+| GET    | `/api/v1/public/establishments/<slug>`      | não  | 200     | 404, 429     |
+| GET    | `/api/v1/public/stats`                      | não  | 200     | 400, 429     |
 
 Só responde para mercado **publicado e ativo**, e devolve `name`, `address`,
 `phone`, `opening_hours` e a lista `baskets`. Nunca CNPJ, `lead`, membros, `slug`
 nem ids internos. Mercado inexistente, não publicado ou suspenso devolvem o
 mesmo 404 — o campo `establishment` tem exatamente 5 chaves, e há teste
 garantindo isso.
+
+### `/api/v1/public/stats` — cestas hoje em Campinas
+
+Conta quantas cestas existem **agora**, no total da cidade ou em um bairro.
+Sem geolocalização e sem serviço externo: a pessoa escolhe o bairro, a API conta.
+
+```bash
+curl "$API/api/v1/public/stats"
+curl "$API/api/v1/public/stats?bairro=Centro"
+```
+
+```json
+{
+  "markets": 2,
+  "baskets": 5,
+  "units": 11,
+  "by_type": { "frutas": 3, "legumes": 2 },
+  "bairro": "Centro",
+  "updated_at": "2026-10-05T12:00:00+00:00"
+}
+```
+
+| Campo        | Significado                                                      |
+| ------------ | ---------------------------------------------------------------- |
+| `markets`    | mercados distintos com pelo menos uma cesta contável              |
+| `baskets`    | ofertas (linhas de cesta) contáveis                               |
+| `units`      | soma de `quantity`: cestas que a pessoa conseguiria retirar       |
+| `by_type`    | `baskets` separado em `frutas` e `legumes` (as duas chaves sempre) |
+| `bairro`     | o bairro filtrado, ou `null` quando é o total da cidade            |
+| `updated_at` | momento da contagem, em UTC, com fuso                             |
+
+O que **entra** na contagem: mercado publicado **e** ativo, cesta `active`,
+`quantity > 0` e `pickup_ends_at` ainda no futuro. Mercado despublicado,
+suspenso ou `pending`, cesta pausada, encerrada, expirada ou sem estoque ficam
+de fora. A comparação de tempo é feita pelo banco (`func.now()`), como no resto
+do projeto — comparar em Python quebraria com o datetime sem fuso do SQLite.
+
+O que **nunca sai**: nome do mercado, id, slug, endereço, telefone, CNPJ ou
+qualquer nome de bairro além do que a pessoa pediu. Um bairro que não existe na
+lista devolve 400 `invalid_bairro` — devolver zero faria a landing anunciar "0
+cestas no seu bairro" quando o problema é o filtro.
+
+**Cache em memória de 60 segundos**, por chave de requisição (caminho + query
+inteira), em `app/public/cache.py`. Sem Redis e sem dependência nova; só 200 entra
+no cache, erro passa direto. O cache vive em `app.extensions`, é por processo e
+não sobrevive a restart — ver os comentários do arquivo para o que isso significa
+com mais de um worker. **Rate limit:** 30/min por IP. CORS é o mesmo de
+`/api/*`.
 
 ### Cestas da sobra do dia
 
@@ -420,7 +522,8 @@ revertido pelo owner do mercado** — o `POST /publish` recusa mercado suspenso.
 | `last_owner`             | 409    | remover ou rebaixar o único dono              |
 | `cnpj_already_used`      | 409    | CNPJ já cadastrado em outro estabelecimento   |
 | `invalid_cnpj`           | 400    | CNPJ com dígito verificador errado            |
-| `incomplete_profile`     | 400    | faltam campos obrigatórios para publicar       |
+| `invalid_bairro`         | 400    | bairro fora de `VALORES_BAIRRO` (perfil e `/public/stats`) |
+| `incomplete_profile`     | 400    | faltam campos obrigatórios para publicar (nome, endereço, telefone, bairro) |
 | `invalid_role`           | 400    | papel fora de owner/manager/staff             |
 | `invalid_name`           | 400    | nome vazio                                   |
 | `internal_error`         | 500    | falha inesperada                              |
@@ -546,7 +649,7 @@ preciso falar com o PoupeFruti — quem convida é o admin, pelo fluxo de aprova
 | --------------- | -------------------------------------------------------------------- |
 | Seleção         | com mais de um vínculo, lista os mercados; com um só, abre direto     |
 | Abas            | **Perfil**, **Cestas** e Equipe; setas do teclado trocam de aba       |
-| Perfil          | nome, CNPJ, endereço, telefone e horário                             |
+| Perfil          | nome, CNPJ, endereço, telefone, **bairro** e horário                |
 | Publicação      | publicar/despublicar; publicar promove `pending` → `active`          |
 | Cestas          | lista em cartões, filtro por status, ajuste rápido de quantidade      |
 | Equipe          | lista membros com papel e ações por linha                             |
@@ -618,7 +721,13 @@ A interface **espelha** o backend para esconder botões inúteis, mas quem decid
   um autopromoção é sempre engano, e o backend só recusaria quando é o último
   dono. Se o backend recusar mesmo assim, o erro aparece.
 - **Publicar com perfil incompleto** devolve 400 `incomplete_profile` com a lista
-  do que falta; a tela repete a mensagem e marca os campos correspondentes.
+  do que falta; a tela repete a mensagem e marca os campos correspondentes. O
+  bairro entra nessa lista: `CAMPOS_PUBLISH` no painel espelha a constante de
+  mesmo nome em `app/establishments/routes.py`.
+- **O `<select>` de bairro não guarda lista no HTML.** As opções são montadas a
+  partir do campo `bairros` do `GET /profile`. Se a lista não vier (backend
+  velho, erro de rede), a tela mantém pelo menos a opção já salva — perder um
+  bairro que a pessoa preencheu seria pior do que um `<select>` curto.
 - Papéis aparecem traduzidos: `owner` = dono, `manager` = gerente,
   `staff` = equipe.
 
@@ -731,6 +840,29 @@ Presentes em `migrations/versions/`:
 | 003     | `003_create_admin_users.py`          | tabela `admin_users`                                   |
 | 004     | `004_invitations_and_establishment_onboarding.py` | tabela `invitations`; em `establishments`: `slug`, `status`, `phone`, `description`, `opening_hours`, `is_published`; `cnpj` passa a anulável |
 | 005     | `005_add_baskets.py`         | tabela `baskets` (oferta da sobra do dia)                  |
+| 006     | `006_add_establishment_bairro.py` | em `establishments`: `bairro VARCHAR(80)` anulável + índice `ix_establishments_bairro` |
+
+### Banco sem Alembic (SQL manual)
+
+Cada migração com efeito estrutural tem um `NNN_manual.sql` ao lado, para banco
+que foi montado à mão e **não tem tabela `alembic_version`**. São idempotentes
+(rodar duas vezes não muda nada) e estão inteiros em `BEGIN`/`COMMIT`, então um
+erro no meio não deixa metade aplicada:
+
+```bash
+psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f migrations/versions/006_manual.sql
+```
+
+| Arquivo         | O que faz                                             |
+| --------------- | ----------------------------------------------------- |
+| `004_manual.sql`| onboarding + `invitations`                            |
+| `005_manual.sql`| tabela `baskets`                                      |
+| `006_manual.sql`| `establishments.bairro` + `ix_establishments_bairro`   |
+
+O `006_manual.sql` **não** cria CHECK com a lista de bairros: essa lista vai
+crescer e um CHECK congelado passaria a rejeitar bairros novos. A validação fica
+na API (`app/validators.py`). Cada arquivo termina com consultas de verificação
+(`information_schema`, `pg_indexes`) que só leem — pode rodar depois de aplicar.
 
 ## Testes
 
@@ -762,6 +894,30 @@ python -m pytest tests/ -q
 - `tests/test_login_rate_limit.py` — limites por IP e por e-mail, e o ProxyFix
 - `tests/test_enum_column_length.py` — o maior valor de cada enum cabe na coluna,
   e a migração 004 bate com o model
+- `tests/test_public_stats.py` — `/api/v1/public/stats`: o que conta e o que não
+  conta (despublicado, suspenso, `pending`, cesta pausada/encerrada/expirada/sem
+  estoque), filtro por bairro e bairro inválido (400), ausência de nome/id/
+  endereço/telefone no payload, cache de 60 s separado por bairro e expirando,
+  datas com e sem fuso, rate limit e a lista única de bairros
+
+## Estilos na landing (`ui/index.html`)
+
+Duas partes do front são geradas por JS a partir da API:
+
+- **"Cestas hoje em Campinas"** (`GET /api/v1/public/stats`): carrega depois da
+  página, em `requestIdleCallback` (ou `setTimeout`), com timeout de 4 s por
+  `AbortController` e **sem retentativa**. Falhou, veio zerado ou veio menos de 1
+  cesta → a seção fica escondida: "0 cestas" é pior que não mostrar nada, porque
+  parece erro. O número entra por `textContent` (nunca `innerHTML`), o valor tem
+  `aria-live="polite"`, o `<select>` tem `<label>`, e a animação de entrada
+  só existe sob `prefers-reduced-motion: no-preference`.
+- **`<select>` de bairro do painel** (`painel.html`): as opções vêm do campo
+  `bairros` do `GET /profile`, e não de uma lista copiada no HTML.
+
+Os dois `<select>` de bairro dos formulários da landing são **estáticos** e têm
+de continuar idênticos entre si e com `VALORES_BAIRRO` — há verificação em
+`tests/test_public_stats.py::TestListaDeBairros` para a lista do backend, e a
+paridade dos dois `<select>` é mantida à mão.
 
 ## Exemplos com curl
 
@@ -842,6 +998,28 @@ curl -i http://localhost:5000/api/v1/admin/establishments/1 \
   -H "Authorization: Bearer $ADMIN"
 ```
 
+### Cestas hoje (público)
+
+```bash
+# Total de Campinas (200) — é o que a landing mostra no bloco "Cestas hoje"
+curl -s http://localhost:5000/api/v1/public/stats
+
+# Só de um bairro (200) — "centro" e "Centro" são o mesmo bairro
+curl -s "http://localhost:5000/api/v1/public/stats?bairro=Centro"
+
+# Bairro fora da lista (400 invalid_bairro)
+curl -i "http://localhost:5000/api/v1/public/stats?bairro=Vila%20Nova"
+```
+
+Guarde o `bairro` no perfil antes de publicar — sem ele o mercado não aparece em
+nenhum filtro:
+
+```bash
+curl -i -X PATCH http://localhost:5000/api/v1/establishments/1/profile \
+  -H "Authorization: Bearer $DONO" -H 'Content-Type: application/json' \
+  -d '{"name":"Mercado","address":"Rua A, 1","phone":"19988880000","bairro":"Centro"}'
+```
+
 ## Notas de segurança
 
 - Senhas nunca são gravadas em texto puro: os models só armazenam `password_hash`
@@ -862,3 +1040,9 @@ curl -i http://localhost:5000/api/v1/admin/establishments/1 \
 - O aceite do convite é atômico (UPDATE condicional + `rowcount`), então dois
   aceites simultâneos criam uma única conta.
 - Taxas no público: `validate` 30/min, `accept` 10/min, login de admin 5/min.
+- `GET /api/v1/public/stats` só devolve números agregados e o bairro pedido.
+  Não sai nome, id, slug, endereço, telefone, CNPJ nem nome de mercado: quem
+  pergunta "quantas cestas têm no meu bairro?" não precisa saber de quem são as
+  cestas, e um mercado suspenso ou despublicado não pode entrar na contagem.
+  Filtro de bairro é de lista fechada (400 no bairro desconhecido) para a landing
+  não anunciar "0 cestas" por causa de um erro de digitação.

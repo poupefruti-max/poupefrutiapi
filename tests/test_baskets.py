@@ -636,8 +636,11 @@ class TestSuspenso:
 
 class TestRotaPublicaComCestas:
     def _publicar(self, client, owner):
+        # `bairro` é exigido para publicar: sem ele o mercado não entraria na
+        # contagem por bairro da rota pública.
         client.patch(f"/api/v1/establishments/{owner['est_id']}/profile", json={
             "name": "Mercado", "address": "Rua A, 1", "phone": "19999990000",
+            "bairro": "Centro",
         }, headers=owner["headers"])
         client.post(f"/api/v1/establishments/{owner['est_id']}/publish",
                     headers=owner["headers"])

@@ -442,6 +442,45 @@ class TestLeadPersistence:
             assert lead.bairro is None
             assert lead.cesta_tipo is None
 
+    def test_bairro_da_lista_grava_o_texto_canonico(self, app):
+        """
+        Bairro que existe na lista vira o texto canônico.
+
+        "centro" e "Centro" viram a mesma coisa: é o que impede a contagem por
+        bairro de dividir o mesmo bairro em duas grafias.
+        """
+        client = app.test_client()
+        response = client.post("/api/leads/cliente", json={
+            "tipo": "cliente",
+            "nome": "Joana",
+            "whatsapp": "(19) 99999-0001",
+            "email": "joana@test.com",
+            "bairro": " centro ",
+            "cesta": "frutas",
+        })
+        assert response.status_code == 201
+        assert response.get_json()["lead"]["bairro"] == "Centro"
+
+    def test_bairro_fora_da_lista_e_aceito(self, app):
+        """
+        Lead com bairro fora da lista NÃO é recusado.
+
+        A lista é nova e o banco já tem valores que não estão nela (a landing
+        tinha duas listas divergentes). Recusar aqui faria a pessoa escolher um
+        bairro errado só para passar pela validação.
+        """
+        client = app.test_client()
+        response = client.post("/api/leads/cliente", json={
+            "tipo": "cliente",
+            "nome": "Vila Nova",
+            "whatsapp": "(19) 99999-0002",
+            "email": "villanova@test.com",
+            "bairro": "Vila Nova",
+            "cesta": "frutas",
+        })
+        assert response.status_code == 201
+        assert response.get_json()["lead"]["bairro"] == "Vila Nova"
+
 
 class TestLeadErrorPaths:
     """

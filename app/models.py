@@ -222,6 +222,10 @@ class Establishment(db.Model):
         index=True,
     )
     phone = db.Column(db.String(20), nullable=True)
+    # Bairro do mercado em Campinas. Nulo enquanto o dono não informar (é o
+    # motivo de `publicar` exigir o campo): a lista canônica é
+    # `app.validators.VALORES_BAIRRO`.
+    bairro = db.Column(db.String(80), nullable=True, index=True)
     # `description` saiu do perfil (virou área de CESTAS, tabela `baskets`).
     # A coluna continua no banco de propósito: nada é apagado aqui, e a
     # remoção física fica para uma etapa posterior com backup.
@@ -253,6 +257,7 @@ class Establishment(db.Model):
             "slug": self.slug,
             "status": self.status.value if self.status else None,
             "phone": self.phone,
+            "bairro": self.bairro,
             "opening_hours": self.opening_hours,
             "is_published": self.is_published,
             "created_at": self.created_at.isoformat() if self.created_at else None,

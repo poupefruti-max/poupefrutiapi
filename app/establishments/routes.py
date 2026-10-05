@@ -13,6 +13,7 @@ from ..rbac import (
     formatar_cnpj,
     normalizar_cnpj,
 )
+from ..validators import VALORES_BAIRRO, bairro_canonico
 from .auth import establishment_role_required
 
 establishments_bp = Blueprint("establishments", __name__, url_prefix="/api/v1/establishments")
@@ -24,10 +25,24 @@ LIMITES = {
     "address": 300,
     "phone": 20,
     "opening_hours": 300,
+    # Mesmo tamanho da coluna (VARCHAR(80)). A lista de app/validators.py é bem
+    # mais curta, mas o limite existe para o caso de o banco receber algo
+    # fora dela por baixo dos panos.
+    "bairro": 80,
 }
 
 #: Campos obrigatórios para publicar.
-CAMPOS_PUBLISH = ("name", "address", "phone")
+#: `bairro` entra porque é o que dá sentido à pergunta "quantas cestas têm no
+#: meu bairro?" — um mercado sem bairro não contaria em nenhum filtro.
+CAMPOS_PUBLISH = ("name", "address", "phone", "bairro")
+
+#: Tradução campo -> rótulo nas mensagens de erro (o que a pessoa lê).
+ROTULOS_PUBLISH = {
+    "name": "nome",
+    "address": "endereço",
+    "phone": "telefone",
+    "bairro": "bairro",
+}
 
 
 def _erro(code: str, message: str, status: int):
@@ -54,6 +69,7 @@ def _perfil_publico(est: Establishment) -> dict:
         "cnpj": formatar_cnpj(est.cnpj) if est.cnpj else None,
         "address": est.address,
         "phone": est.phone,
+        "bairro": est.bairro,
         "opening_hours": est.opening_hours,
         "slug": est.slug,
         "status": est.status.value if est.status else None,
@@ -70,7 +86,10 @@ def _perfil_publico(est: Establishment) -> dict:
 def ver_perfil(establishment_id: int):
     dados = _perfil_publico(g.establishment)
     dados["meu_papel"] = g.meu_papel
-    return jsonify({"establishment": dados}), 200
+    # A lista de bairros vai junto para o painel montar o <select> a partir
+    # dela. Sem isto, o painel manteria uma cópia da lista no HTML — que é
+    # exatamente o que divergiu entre os dois formulários da landing.
+    return jsonify({"establishment": dados, "bairros": list(VALORES_BAIRRO)}), 200
 
 
 # ---------------------------------------------------------------------------
@@ -121,6 +140,23 @@ def editar_perfil(establishment_id: int):
         if campo in dados:
             setattr(est, campo, _texto(dados.get(campo), campo) or None)
 
+    # --- bairro ---
+    # Lista fechada, de propósito: é o que permite contar cestas por bairro sem
+    # geolocalização e sem variantar "Centro" de três formas.
+    if "bairro" in dados:
+        bruto = _texto(dados.get("bairro"), "bairro")
+        if not bruto:
+            est.bairro = None                 # permite limpar
+        else:
+            canonico = bairro_canonico(bruto)
+            if canonico is None:
+                return _erro(
+                    "invalid_bairro",
+                    "Bairro inválido. Escolha um bairro da lista de Campinas.",
+                    400,
+                )
+            est.bairro = canonico
+
     try:
         db.session.commit()
     except Exception:
@@ -139,19 +175,18 @@ def editar_perfil(establishment_id: int):
 def publicar(establishment_id: int):
     """Publica a página do mercado.
 
-    Exige nome, endereço e telefone preenchidos. Publicar um mercado ainda
-    `pending` o promove para `active` — é o momento em que ele fica visível na
-    rota pública.
+    Exige nome, endereço, telefone e bairro preenchidos. Publicar um mercado
+    ainda `pending` o promove para `active` — é o momento em que ele fica
+    visível na rota pública.
     """
     est = g.establishment
 
     faltando = [c for c in CAMPOS_PUBLISH if not (getattr(est, c) or "").strip()]
     if faltando:
-        rotulos = {"name": "nome", "address": "endereço", "phone": "telefone"}
         return _erro(
             "incomplete_profile",
             "Complete antes de publicar: "
-            + ", ".join(rotulos[c] for c in faltando)
+            + ", ".join(ROTULOS_PUBLISH[c] for c in faltando)
             + ".",
             400,
         )

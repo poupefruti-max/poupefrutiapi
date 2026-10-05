@@ -14,6 +14,7 @@ from ..models import Lead, LeadType
 from ..validators import (
     VALORES_CESTA,
     VALORES_TIPO_ESTABELECIMENTO,
+    bairro_canonico,
     email_valido,
     normalizar_email,
     normalizar_texto,
@@ -114,7 +115,19 @@ def _validar_comuns(data: dict, exigir_nome: bool = True):
         )
 
     # bairro pode ser vazio (vira NULL no banco)
-    bairro = normalizar_texto(data.get("bairro"))
+    #
+    # Aqui NÃO recusamos bairro fora da lista de app/validators.py, e é
+    # deliberado: a lista é nova, o banco já tem valores fora dela (a landing
+    # tinha duas listas divergentes até agora) e este cadastro é a única porta
+    # de entrada de bairro que existe. Recusar faria a pessoa escolher um bairro
+    # errado só para passar pela validação.
+    #
+    # O que fazemos é o contrário: quando o bairro É um valor da lista, grava o
+    # texto canônico. "centro" vira "Centro", e a contagem por bairro da rota
+    # pública não divide o mesmo bairro em duas grafias. Fora da lista, o texto
+    # vai como veio — é dado histórico, e ninguém o renomeia.
+    bairro = normalizar_texto(data.get("bairro")) or ""
+    bairro = bairro_canonico(bairro) or bairro
 
     # Mercado não pede e-mail na UI (vem vazio). Só validamos quando preenchido.
     if email and not email_valido(email):

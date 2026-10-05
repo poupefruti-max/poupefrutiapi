@@ -25,6 +25,7 @@ from app.rbac import (
     pode_acao,
     pode_agir_sobre,
 )
+from app.validators import BAIRRO_NAO_LISTADO, VALORES_BAIRRO
 
 
 # ---------------------------------------------------------------------------
@@ -293,6 +294,36 @@ class TestPerfil:
         assert resp.status_code == 400
         assert resp.get_json()["error"]["code"] == "invalid_name"
 
+    def test_baixa_bairro(self, owner):
+        resp = _patch(owner, "/profile", {"bairro": "Centro"})
+        assert resp.status_code == 200
+        assert resp.get_json()["establishment"]["bairro"] == "Centro"
+
+    def test_bairro_grafia_variada_vira_canonico(self, owner):
+        """'centro' grava 'Centro': é o que mantém a contagem por bairro uma só."""
+        resp = _patch(owner, "/profile", {"bairro": "  centro "})
+        assert resp.status_code == 200
+        assert resp.get_json()["establishment"]["bairro"] == "Centro"
+
+    def test_bairro_fora_da_lista_recusado(self, owner):
+        resp = _patch(owner, "/profile", {"bairro": "Vila Nova"})
+        assert resp.status_code == 400
+        assert resp.get_json()["error"]["code"] == "invalid_bairro"
+
+    def test_bairro_pode_ser_limpo(self, owner):
+        _patch(owner, "/profile", {"bairro": "Centro"})
+        resp = _patch(owner, "/profile", {"bairro": ""})
+        assert resp.status_code == 200
+        assert resp.get_json()["establishment"]["bairro"] is None
+
+    def test_perfil_devolve_a_lista_de_bairros(self, owner):
+        """O painel monta o <select> a partir daqui, sem copiar a lista no HTML."""
+        resp = _GET_RAW(owner["est_id"], "/profile", owner["headers"])
+        assert resp.status_code == 200
+        bairros = resp.get_json()["bairros"]
+        assert bairros == list(VALORES_BAIRRO)
+        assert bairros[-1] == BAIRRO_NAO_LISTADO
+
 
 # helpers para as rotas (o prefixo depende do mercado do fixture)
 def _url(p, caminho):
@@ -336,9 +367,27 @@ class TestPublicacao:
         assert resp.status_code == 400
         assert resp.get_json()["error"]["code"] == "incomplete_profile"
 
+    def test_publicar_exige_bairro(self, owner):
+        """Sem bairro o mercado não entra na contagem por bairro da landing."""
+        _patch(owner, "/profile", {
+            "name": "Mercado", "address": "Rua A, 1", "phone": "19988880000",
+        })
+        resp = _post(owner, "/publish")
+        assert resp.status_code == 400
+        assert resp.get_json()["error"]["code"] == "incomplete_profile"
+        assert "bairro" in resp.get_json()["error"]["message"]
+
+    def test_publicar_com_bairro(self, owner):
+        _patch(owner, "/profile", {
+            "name": "Mercado", "address": "Rua A, 1", "phone": "19988880000",
+            "bairro": "Centro",
+        })
+        assert _post(owner, "/publish").status_code == 200
+
     def test_publicar_promove_para_active(self, owner):
         _patch(owner, "/profile", {
             "name": "Mercado", "address": "Rua A, 1", "phone": "19988880000",
+            "bairro": "Centro",
         })
         resp = _post(owner, "/publish")
         assert resp.status_code == 200
@@ -349,6 +398,7 @@ class TestPublicacao:
     def test_despublicar(self, owner):
         _patch(owner, "/profile", {
             "name": "Mercado", "address": "Rua A, 1", "phone": "19988880000",
+            "bairro": "Centro",
         })
         _post(owner, "/publish")
         resp = _post(owner, "/unpublish")
@@ -790,6 +840,7 @@ class TestSuspensao:
         est = owner["est_id"]
         _patch(owner, "/profile", {
             "name": "Mercado", "address": "Rua A, 1", "phone": "19988880000",
+            "bairro": "Centro",
         })
         _post(owner, "/publish")
 
@@ -809,6 +860,7 @@ class TestSuspensao:
         est = owner["est_id"]
         _patch(owner, "/profile", {
             "name": "Mercado", "address": "Rua A, 1", "phone": "19988880000",
+            "bairro": "Centro",
         })
         _post(owner, "/publish")
 
@@ -847,7 +899,7 @@ class TestRotaPublica:
     def _publicar(self, owner):
         _patch(owner, "/profile", {
             "name": "Mercado", "address": "Rua A, 1", "phone": "19999990000",
-            "opening_hours": "Seg a Sex, 8-18",
+            "bairro": "Centro", "opening_hours": "Seg a Sex, 8-18",
         })
         _post(owner, "/publish")
 

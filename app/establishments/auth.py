@@ -18,11 +18,20 @@ from ..extensions import db
 from ..models import Establishment, EstablishmentMember
 from ..rbac import pode_acao
 
-#: Papéis que exigem que o mercado esteja ativo para escrita.
-ESCRITAS = {
-    "editar_perfil", "publicar", "convidar_staff", "convidar_manager",
-    "convidar_owner", "alterar_papel", "remover_membro",
+# Define-se as ações de LEITURA (ACOES_DE_LEITURA) e não as de escrita: uma
+# ação nova que não for declarada ali é tratada como escrita e passa a ser
+# bloqueada na suspensão. Com a lista inversa, esquecer `ajustar_estoque` ao
+# suspender a venda seria silencioso.
+ACOES_DE_LEITURA = {
+    "ver_perfil",
+    "ver_equipe",
+    "ver_cestas",
 }
+
+
+def _eh_escrita(acao: str) -> bool:
+    """True quando a ação altera dados (e precisa de mercado ativo)."""
+    return acao not in ACOES_DE_LEITURA
 
 
 def _erro(code: str, message: str, status: int):
@@ -84,7 +93,7 @@ def establishment_role_required(acao: str):
 
             # --- bloqueio por suspensão ---
             # Leitura continua; escrita para. O admin suspende e a página some.
-            if acao in ESCRITAS and establishment.status is not None:
+            if _eh_escrita(acao) and establishment.status is not None:
                 if establishment.status.value == "suspended":
                     return _erro(
                         "establishment_suspended",

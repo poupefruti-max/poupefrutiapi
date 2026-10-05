@@ -23,7 +23,6 @@ LIMITES = {
     "cnpj": 18,
     "address": 300,
     "phone": 20,
-    "description": 2000,
     "opening_hours": 300,
 }
 
@@ -55,7 +54,6 @@ def _perfil_publico(est: Establishment) -> dict:
         "cnpj": formatar_cnpj(est.cnpj) if est.cnpj else None,
         "address": est.address,
         "phone": est.phone,
-        "description": est.description,
         "opening_hours": est.opening_hours,
         "slug": est.slug,
         "status": est.status.value if est.status else None,
@@ -118,7 +116,8 @@ def editar_perfil(establishment_id: int):
             est.cnpj = digitos
 
     # --- campos de texto ---
-    for campo in ("address", "phone", "description", "opening_hours"):
+    # `description` NÃO entra mais aqui: virou a área de CESTAS (/baskets).
+    for campo in ("address", "phone", "opening_hours"):
         if campo in dados:
             setattr(est, campo, _texto(dados.get(campo), campo) or None)
 

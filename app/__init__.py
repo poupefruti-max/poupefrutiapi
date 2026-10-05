@@ -149,7 +149,7 @@ def _register_blueprints(app: Flask) -> None:
     from .leads import leads_bp
     from .admin import admin_auth_bp, admin_bp, admin_market_bp
     from .invitations import invitations_bp
-    from .establishments import establishments_bp, team_bp
+    from .establishments import establishments_bp, team_bp, baskets_bp
     from .public import public_bp
 
     app.register_blueprint(auth_bp)
@@ -160,6 +160,7 @@ def _register_blueprints(app: Flask) -> None:
     app.register_blueprint(invitations_bp)
     app.register_blueprint(establishments_bp)
     app.register_blueprint(team_bp)
+    app.register_blueprint(baskets_bp)
     app.register_blueprint(public_bp)
 
 

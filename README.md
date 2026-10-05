@@ -21,6 +21,7 @@ a existir depois que o lead é convertido.
 | `users`                 | Usuário final, com `lead_id` apontando para o lead de origem    |
 | `establishments`        | Estabelecimento, com `lead_id`, `slug`, `status`, `phone`, `description`, `opening_hours`, `is_published`. O `cnpj` é **anulável** (o dono informa depois) |
 | `establishment_members` | Vínculo usuário↔estabelecimento com `role` (padrão `owner`)     |
+| `baskets`               | Cestas da sobra do dia (frutas/legumes) com desconto e estoque           |
 | `invitations`           | Convites de acesso. Guarda **apenas o SHA-256** do token         |
 | `admin_users`           | Administradores do painel, **sem relação com `users`**          |
 
@@ -28,7 +29,8 @@ a existir depois que o lead é convertido.
 campos variáveis ficam em `leads.extra` (JSONB).
 
 Papéis e status ficam em `app/rbac.py` (fonte única): `owner`, `manager`,
-`staff`; e `pending`, `active`, `suspended`.
+`staff`; e `pending`, `active`, `suspended`. Os enums de cesta também:
+`frutas`/`legumes` e `active`/`paused`/`closed`.
 
 ## Endpoints
 
@@ -155,20 +157,21 @@ Detalhes de segurança:
 
 ### Endpoints admin
 
-| Método | Rota                          | Auth | Descrição                                  |
-| ------ | ----------------------------- | ---- | ------------------------------------------ |
-| POST   | `/api/v1/admin/auth/login`    | não  | Login do admin (limite de 5/min por IP)     |
-| GET    | `/api/v1/admin/auth/me`       | sim  | Administrador do token                     |
-| GET    | `/api/v1/admin/leads`         | sim  | Listagem com filtros e paginação           |
-| GET    | `/api/v1/admin/leads/<id>`    | sim  | Detalhe do lead                            |
-| PATCH  | `/api/v1/admin/leads/<id>/status` | sim | Alteração de status                     |
-| POST   | `/api/v1/admin/leads/<id>/convert` | sim | Conversão em usuário (só `person`)   |
-| POST   | `/api/v1/admin/leads/<id>/approve-market` | sim | Aprova mercado e gera convite (`establishment`) |
-| POST   | `/api/v1/admin/establishments/<id>/invitations` | sim | Novo link de acesso |
-| GET    | `/api/v1/admin/establishments` | sim | Lista mercados com status do convite       |
-| GET    | `/api/v1/admin/establishments/<id>` | sim | Detalhe com membros e convites        |
-| GET    | `/api/v1/admin/stats`         | sim  | Estatísticas                               |
-| GET    | `/api/v1/admin/export`        | sim  | Exportação CSV                             |
+| Método   | Rota                          | Descrição                          |
+| -------- | ----------------------------- | ---------------------------------- |
+| POST     | `/api/v1/admin/auth/login`    | Login do admin (limite de 5/min por IP) |
+| GET      | `/api/v1/admin/auth/me`       | Administrador do token             |
+| GET      | `/api/v1/admin/leads`         | Listagem com filtros e paginação    |
+| GET      | `/api/v1/admin/leads/<id>`    | Detalhe do lead                    |
+| PATCH    | `/api/v1/admin/leads/<id>/status` | Alteração de status              |
+| POST     | `/api/v1/admin/leads/<id>/convert` | Conversão em usuário (só `person`) |
+| POST     | `/api/v1/admin/leads/<id>/approve-market` | Aprova mercado e gera convite |
+| POST     | `/api/v1/admin/establishments/<id>/invitations` | Gera convite de `owner` |
+| GET      | `/api/v1/admin/establishments` | Lista mercados com status do convite|
+| GET      | `/api/v1/admin/establishments/<id>` | Detalhe, membros e convites     |
+| PATCH    | `/api/v1/admin/establishments/<id>/status` | Suspende ou reativa     |
+| GET      | `/api/v1/admin/stats`         | Estatísticas                       |
+| GET      | `/api/v1/admin/export`        | Exportação CSV                     |
 
 **Parâmetros de** `GET /api/v1/admin/leads` (e de `/export`, que aceita os mesmos
 filtros): `status`, `type`, `bairro`, `search` (nome/e-mail/telefone), `page`,
@@ -219,13 +222,19 @@ alguém vale na hora, com o token que a pessoa já tinha.
 | Ação                                | owner | manager | staff |
 | ----------------------------------- | :---: | :-----: | :---: |
 | Ver perfil e equipe                 |  sim  |   sim   |  sim  |
+| Ver cestas                          |  sim  |   sim   |  sim  |
 | Editar perfil                       |  sim  |   sim   |  não  |
 | Publicar / despublicar página       |  sim  |   sim   |  não  |
+| Gerenciar cestas (criar/editar)     |  sim  |   sim   |  não  |
+| Ajustar estoque de cesta            |  sim  |   sim   |  sim  |
 | Gerar link para `staff`             |  sim  |   sim   |  não  |
 | Gerar link para `manager`           |  sim  |   não   |  não  |
 | Gerar link para `owner`             |  não  |   não   |  não  |
-| Alterar papel                       |  sim  | só staff|  não  |
-| Remover membro                      |  sim  | só staff|  não  |
+| Alterar papel                       |  sim  | só equipe|  não  |
+| Remover membro                      |  sim  | só equipe|  não  |
+
+Staff ajusta estoque (o que faz no balcão) mas **nunca cria, edita campos nem
+encerra** uma cesta: quem monta a oferta é gerência.
 
 Regras adicionais:
 
@@ -283,11 +292,70 @@ mercado sai de `pending` para `active`.
 | ------ | ------------------------------------------- | ---- | ------- | ------- |
 | GET    | `/api/v1/public/establishments/<slug>`      | não  | 200     | 404, 429 |
 
-Só responde para mercado **publicado e ativo**, e devolve apenas `name`,
-`description`, `address`, `phone` e `opening_hours`. Nunca CNPJ, `lead`,
-membros, `slug` nem ids internos. Mercado inexistente, não publicado ou
-suspenso devolvem o mesmo 404 — o campo `establishment` tem exatamente 5 chaves,
-e há teste garantindo isso.
+Só responde para mercado **publicado e ativo**, e devolve `name`, `address`,
+`phone`, `opening_hours` e a lista `baskets`. Nunca CNPJ, `lead`, membros, `slug`
+nem ids internos. Mercado inexistente, não publicado ou suspenso devolvem o
+mesmo 404 — o campo `establishment` tem exatamente 5 chaves, e há teste
+garantindo isso.
+
+### Cestas da sobra do dia
+
+O mercado cadastra as cestas de frutas ou legumes que está oferecendo, com
+desconto. Ainda **não há pedidos nem pagamento** — a cesta é a oferta e o
+estoque. As cestas públicas são só as que dá para retirar agora: `status`
+`active`, `quantity > 0` e `pickup_ends_at` no futuro.
+
+| Método | Rota                                        | Permissão          | Descrição                       |
+| ------ | ------------------------------------------- | ------------------ | ------------------------------- |
+| GET    | `/api/v1/establishments/<id>/baskets`       | `ver_cestas`       | Lista, por retirada mais próxima |
+| POST   | `/api/v1/establishments/<id>/baskets`       | `gerenciar_cestas` | Cria                            |
+| GET    | `/api/v1/establishments/<id>/baskets/<id>`  | `ver_cestas`       | Detalhe                         |
+| PATCH  | `/api/v1/establishments/<id>/baskets/<id>`  | `gerenciar_cestas` | Edita qualquer campo, inclusive o status |
+| PATCH  | `/api/v1/establishments/<id>/baskets/<id>/quantity` | `ajustar_estoque` | `{"quantity": N}` ou `{"delta": ±N}` |
+
+`GET` aceita `?status=active|paused|closed`.
+
+**Não existe DELETE.** Encerrar é `PATCH` com `{"status": "closed"}`, e uma cesta
+encerrada não volta a ativa (409 `basket_closed`) — é o que preservará o
+histórico quando os pedidos passarem a referenciar a cesta.
+
+O ajuste de estoque é **atômico**: um `UPDATE ... WHERE quantity + delta >= 0`.
+Dois balcões vendendo a última cesta ao mesmo tempo não conseguem zerar duas
+vezes; ler-e-gravar deixaria passar.
+
+### Validação das cestas
+
+| Campo                 | Regra                                                    |
+| --------------------- | -------------------------------------------------------- |
+| `type`                | `frutas` ou `legumes`                                     |
+| `price_cents`         | 100 a 50000 (R$ 1,00 a R$ 500,00)                        |
+| `weight_grams`        | 500 a 30000                                              |
+| `quantity`            | 0 a 999                                                  |
+| `retail_value_cents`  | opcional; se enviado, **maior** que `price_cents`          |
+| `pickup_starts_at`    | ISO 8601, com ou sem fuso                                 |
+| `pickup_ends_at`      | depois do início, no futuro, janela de **até 7 dias**      |
+| `name`                | até 80 caracteres, aparado, sem HTML                       |
+| `notes`               | até 280 caracteres, aparado, sem HTML                      |
+
+Um mercado pode ter no máximo **50 cestas ativas ou pausadas** (409
+`too_many_baskets`). Cestas `closed` não contam.
+
+Erros saem no formato `{"error": {"code", "message"}}`, com código por campo:
+`invalid_type`, `invalid_price_cents`, `invalid_quantity`,
+`invalid_weight_grams`, `invalid_retail_value_cents`, `invalid_pickup_window`,
+`pickup_window_too_long`, `pickup_in_past`, `invalid_status`, `too_many_baskets`,
+`insufficient_stock`, `basket_closed`.
+
+As respostas incluem `discount_percent` (só quando há `retail_value_cents`).
+
+### `description` do perfil está obsoleto
+
+O campo `description` do perfil **saiu do fluxo**: não é mais aceito no
+`PATCH /profile`, não aparece no `GET /profile` e sumiu da rota pública — a área
+de cestas o substituiu.
+
+**A coluna continua no banco.** Nada é apagado aqui; a remoção física fica para
+uma etapa posterior, com backup.
 
 ### Administração do mercado
 
@@ -477,10 +545,49 @@ preciso falar com o PoupeFruti — quem convida é o admin, pelo fluxo de aprova
 | Área            | Comportamento                                                        |
 | --------------- | -------------------------------------------------------------------- |
 | Seleção         | com mais de um vínculo, lista os mercados; com um só, abre direto     |
-| Perfil          | nome, CNPJ, endereço, telefone, descrição e horário                  |
+| Abas            | **Perfil**, **Cestas** e Equipe; setas do teclado trocam de aba       |
+| Perfil          | nome, CNPJ, endereço, telefone e horário                             |
 | Publicação      | publicar/despublicar; publicar promove `pending` → `active`          |
+| Cestas          | lista em cartões, filtro por status, ajuste rápido de quantidade      |
 | Equipe          | lista membros com papel e ações por linha                             |
 | Convites        | gera link (uma vez só) e revoga pendentes                            |
+
+### Cestas na tela
+
+Cada cartão mostra o tipo (🍎 frutas / 🥕 legumes), o nome — ou "Cesta de
+frutas"/"Cesta de legumes" quando vazio —, "cerca de X kg", o preço em R$, o
+varejo riscado com selo de desconto, a quantidade, a janela de retirada em
+horário de Brasília ("Hoje, 17h às 19h" ou "12/10, 17h às 19h") e a observação.
+
+O badge distingue **expirada**: uma cesta `active` cuja janela já passou aparece
+como expirada, porque não dá mais para retirar.
+
+**Ajuste rápido de quantidade**: os botões − e + em cada cartão chamam
+`PATCH /baskets/<id>/quantity` com `{"delta": ±1}`. A atualização é otimista — o
+número muda na hora — e **volta ao valor anterior** se a API recusar, mostrando o
+motivo (por exemplo, estoque insuficiente). Depois de qualquer ajuste, o número
+exibido é o que o servidor devolveu.
+
+**Formulário** (só owner e manager): tipo em cartões de opção, nome opcional,
+peso em kg (convertido para gramas), preço e varejo em R$ aceitando vírgula,
+quantidade, janela de retirada e observação com contador de caracteres. O
+desconto aparece ao vivo, e os placeholders sugerem os valores da landing
+(frutas: ~4 kg, R$ 35, varejo R$ 70; legumes: ~4 kg, R$ 25, varejo R$ 50).
+
+O dinheiro é convertido **por texto**, nunca por `parseFloat`: em ponto flutuante
+`0.1 + 0.2` daria 3003 centavos em vez de 3000. O `datetime-local` é
+interpretado como Brasília e enviado em ISO 8601 com o offset `-03:00`.
+
+### Quem vê o quê na tela
+
+| Papel   | Aba Cestas                                                 |
+| ------- | ---------------------------------------------------------- |
+| owner    | lista, cria, edita, pausa, encerra e ajusta estoque         |
+| manager  | lista, cria, edita, pausa, encerra e ajusta estoque         |
+| staff    | **só a lista e o ajuste de quantidade** — sem criar/editar/encerrar |
+
+Essas regras escondem botões; o backend continua sendo a autoridade. Se a tela
+mostrar algo que a API recusar, o erro aparece na tela.
 
 ### Como a tela reage ao backend
 
@@ -492,8 +599,9 @@ A interface **espelha** o backend para esconder botões inúteis, mas quem decid
   mercados e recarrega os vínculos.
 - **Mercado suspenso** (`status: suspended`): mostra um aviso fixo no topo
   ("Este mercado está suspenso. Fale com o PoupeFruti."), desabilita os campos
-  e esconde os botões de edição e convite. **A leitura continua** — o perfil e
-  a equipe continuam visíveis.
+  e esconde os botões de edição, convite e criação de cesta. **A leitura
+  continua** — perfil, equipe e a lista de cestas continuam visíveis, com o
+  ajuste de estoque desabilitado.
 - **Ações por papel** (mesma tabela da seção de RBAC):
 
   | quem         | convida gerente | convida equipe | age sobre |
@@ -622,6 +730,7 @@ Presentes em `migrations/versions/`:
 | 002     | `002_add_bairro_cesta_tipo.py`       | colunas `bairro` e `cesta_tipo` + índices (idempotente) |
 | 003     | `003_create_admin_users.py`          | tabela `admin_users`                                   |
 | 004     | `004_invitations_and_establishment_onboarding.py` | tabela `invitations`; em `establishments`: `slug`, `status`, `phone`, `description`, `opening_hours`, `is_published`; `cnpj` passa a anulável |
+| 005     | `005_add_baskets.py`         | tabela `baskets` (oferta da sobra do dia)                  |
 
 ## Testes
 
@@ -642,6 +751,17 @@ python -m pytest tests/ -q
   (incluindo manager tentando promover a manager), isolamento entre mercados
   (404), efeito imediato de remoção/rebaixamento, regra do último owner com
   `FOR UPDATE`, suspensão e vazamento de dados na rota pública
+- `tests/test_baskets.py` — CRUD de cestas, validação de cada limite, RBAC por
+  papel (staff só ajusta estoque), ajuste atômico sem passar de zero, limite de
+  50 cestas, e o que a rota pública mostra e não mostra
+- `tests/test_timezones.py` — datas com e sem fuso: `esta_pendente`, status do
+  convite, `validar_convite` e `aceitar_convite` nos dois formatos, mais uma
+  varredura que falha se `datetime.utcnow` voltar
+- `tests/test_cors_errors.py` — CORS (404/405/429/500) e o handler de 500 que não
+  pode levantar ao desfazer a sessão
+- `tests/test_login_rate_limit.py` — limites por IP e por e-mail, e o ProxyFix
+- `tests/test_enum_column_length.py` — o maior valor de cada enum cabe na coluna,
+  e a migração 004 bate com o model
 
 ## Exemplos com curl
 

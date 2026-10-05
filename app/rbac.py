@@ -46,10 +46,56 @@ class EstablishmentStatus(enum.Enum):
 VALID_ESTABLISHMENT_STATUS = {s.value for s in EstablishmentStatus}
 
 
+class BasketType(enum.Enum):
+    """Tipo de cesta oferecida na sobra do dia."""
+
+    frutas = "frutas"
+    legumes = "legumes"
+
+
+VALID_BASKET_TYPES = {t.value for t in BasketType}
+
+
+class BasketStatus(enum.Enum):
+    """Ciclo de vida de uma cesta.
+
+    Não existe DELETE: encerrar é `closed`, porque pedidos futuros vão
+    referenciar a cesta e não podem perde-la do histórico.
+    """
+
+    active = "active"
+    paused = "paused"
+    closed = "closed"
+
+
+VALID_BASKET_STATUS = {s.value for s in BasketStatus}
+
+
+def _normalizar_enum(valor, enum_cls, validos: set[str]) -> str | None:
+    """Aceita string ou o próprio Enum e devolve o valor canônico, ou None."""
+    if isinstance(valor, enum_cls):
+        return valor.value
+    if isinstance(valor, str):
+        candidato = valor.strip().lower()
+        if candidato in validos:
+            return candidato
+    return None
+
+
+def normalizar_basket_type(valor) -> str | None:
+    """'FRUTAS' -> 'frutas'; valor desconhecido ou None -> None."""
+    return _normalizar_enum(valor, BasketType, VALID_BASKET_TYPES)
+
+
+def normalizar_basket_status(valor) -> str | None:
+    """Valor canônico de status de cesta, ou None."""
+    return _normalizar_enum(valor, BasketStatus, VALID_BASKET_STATUS)
+
+
 # ===========================================================================
 # Matriz de permissões
 # ===========================================================================
-#
+
 # Fonte única de verdade. Qualquer rota que precise saber "esse papel pode fazer
 # isso?" consulta PERMISSOES — não há lista de roles espalhada pelo código.
 #
@@ -59,10 +105,17 @@ PERMISSOES: dict[str, set[str]] = {
     # --- leitura (todos) ---
     "ver_perfil":        {"owner", "manager", "staff"},
     "ver_equipe":        {"owner", "manager", "staff"},
+    "ver_cestas":        {"owner", "manager", "staff"},
 
     # --- escrita no próprio estabelecimento ---
     "editar_perfil":     {"owner", "manager"},
     "publicar":          {"owner", "manager"},
+
+    # --- cestas ---
+    # Staff ajusta estoque (o que ele faz no balcão), mas NUNCA cria, edita
+    # campos nem encerra: quem monta a oferta é gerência.
+    "gerenciar_cestas":  {"owner", "manager"},
+    "ajustar_estoque":   {"owner", "manager", "staff"},
 
     # --- convites ---
     "convidar_staff":    {"owner", "manager"},

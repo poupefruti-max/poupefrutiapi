@@ -21,6 +21,7 @@ from ..validators import (
     whatsapp_valido,
 )
 from ..admin.decorators import admin_required
+from flask_jwt_extended import jwt_required
 from services import create_lead, DuplicateLeadError
 
 leads_bp = Blueprint("leads", __name__, url_prefix="/api/leads")
@@ -250,6 +251,7 @@ def criar_mercado():
 # POST /api/leads/<id>/convert
 # ---------------------------------------------------------------------------
 @leads_bp.post("/<int:lead_id>/convert")
+@jwt_required()
 @admin_required
 def converter_lead(lead_id: int):
     """Converte um lead em usuário/estabelecimento. Requer autenticação de admin."""

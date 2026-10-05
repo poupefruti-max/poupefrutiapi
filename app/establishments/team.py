@@ -6,6 +6,7 @@ só mexe em staff.
 """
 
 from flask import Blueprint, current_app, g, jsonify, request
+from flask_jwt_extended import jwt_required
 
 from ..extensions import db
 from ..models import EstablishmentMember, Invitation, User
@@ -92,6 +93,7 @@ def _contar_owners(establishment_id: int) -> int:
 # GET /api/v1/establishments/<id>/members
 # ---------------------------------------------------------------------------
 @team_bp.get("/<int:establishment_id>/members")
+@jwt_required()
 @establishment_role_required("ver_equipe")
 def listar_membros(establishment_id: int):
     """Membros do mercado e convites pendentes (sem hash de token)."""
@@ -142,6 +144,7 @@ def listar_membros(establishment_id: int):
 # POST /api/v1/establishments/<id>/invitations
 # ---------------------------------------------------------------------------
 @team_bp.post("/<int:establishment_id>/invitations")
+@jwt_required()
 @establishment_role_required("convidar_staff")
 def gerar_convite(establishment_id: int):
     """Gera convite para manager ou staff (owner só pela administração)."""
@@ -207,6 +210,7 @@ def gerar_convite(establishment_id: int):
 # DELETE /api/v1/establishments/<id>/invitations/<invitation_id>
 # ---------------------------------------------------------------------------
 @team_bp.delete("/<int:establishment_id>/invitations/<int:invitation_id>")
+@jwt_required()
 @establishment_role_required("convidar_staff")
 def revogar_convite(establishment_id: int, invitation_id: int):
     """Revoga um convite pendente do próprio mercado."""
@@ -236,6 +240,7 @@ def revogar_convite(establishment_id: int, invitation_id: int):
 # PATCH /api/v1/establishments/<id>/members/<user_id>
 # ---------------------------------------------------------------------------
 @team_bp.patch("/<int:establishment_id>/members/<int:user_id>")
+@jwt_required()
 @establishment_role_required("alterar_papel")
 def alterar_papel(establishment_id: int, user_id: int):
     """Muda o papel de um membro."""
@@ -287,6 +292,7 @@ def alterar_papel(establishment_id: int, user_id: int):
 # DELETE /api/v1/establishments/<id>/members/<user_id>
 # ---------------------------------------------------------------------------
 @team_bp.delete("/<int:establishment_id>/members/<int:user_id>")
+@jwt_required()
 @establishment_role_required("remover_membro")
 def remover_membro(establishment_id: int, user_id: int):
     """Remove o vínculo. O User continua existindo."""

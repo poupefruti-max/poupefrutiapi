@@ -27,9 +27,11 @@ def _coluna_existe(tabela: str, coluna: str) -> bool:
     """True se a coluna já existe no banco (permite rodar em bases divergentes)."""
     bind = op.get_bind()
     return bool(
-        bind.exec_driver_sql(
-            "SELECT 1 FROM information_schema.columns "
-            "WHERE table_name = :t AND column_name = :c",
+        bind.execute(
+            sa.text(
+                "SELECT 1 FROM information_schema.columns "
+                "WHERE table_name = :t AND column_name = :c"
+            ),
             {"t": tabela, "c": coluna},
         ).scalar()
     )
@@ -39,8 +41,8 @@ def _indice_existe(nome: str) -> bool:
     """True se o índice já existe (bases aplicadas à mão podem já tê-lo)."""
     bind = op.get_bind()
     return bool(
-        bind.exec_driver_sql(
-            "SELECT 1 FROM pg_indexes WHERE indexname = :n", {"n": nome}
+        bind.execute(
+            sa.text("SELECT 1 FROM pg_indexes WHERE indexname = :n"), {"n": nome}
         ).scalar()
     )
 

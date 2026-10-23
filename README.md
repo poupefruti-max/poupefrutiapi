@@ -98,6 +98,49 @@ Prefixo `/api/v1/auth`
 | POST   | `/register` | não  | 201     | 400, 409                 |
 | POST   | `/login`    | não  | 200     | 400, 401, **429**        |
 | GET    | `/me`       | sim  | 200     | 401, 403, 404            |
+| POST   | `/logout`   | sim  | 200     | 401, 500                 |
+
+O cadastro público sempre cria um usuário comum; campos adicionais enviados
+no JSON não podem conceder papel administrativo ou vínculo com mercado. Os
+JWTs de acesso expiram em uma hora e `/logout` revoga o token atual no banco.
+O frontend guarda o bearer token apenas em `sessionStorage` e apaga a cópia
+local ao sair. A lista de revogações precisa da revisão 007; aplique migrations
+somente no ambiente de destino após confirmar o backup e a janela operacional.
+O comando `flask --app wsgi purge-revoked-tokens` remove registros cuja validade
+já terminou e pode ser agendado periodicamente.
+
+Corpos e respostas principais:
+
+```text
+POST /api/v1/auth/register
+{"name":"Maria Silva","email":"maria@exemplo.com","password":"uma-senha-segura"}
+-> 201 {"message":"Conta criada com sucesso.","user":{"id":1,"email":"maria@exemplo.com","name":"Maria Silva"}}
+
+POST /api/v1/auth/login
+{"email":"maria@exemplo.com","password":"uma-senha-segura"}
+-> 200 {"access_token":"<JWT>","user":{"id":1,"email":"maria@exemplo.com","name":"Maria Silva"}}
+
+GET /api/v1/auth/me
+Authorization: Bearer <JWT>
+-> 200 {"user":{"id":1,"email":"maria@exemplo.com","name":"Maria Silva","memberships":[]}}
+
+POST /api/v1/auth/logout
+Authorization: Bearer <JWT>
+-> 200 {"message":"Sessão encerrada."}
+```
+
+Falhas seguem `{ "error": { "code": "...", "message": "..." } }`.
+Login responde `invalid_credentials` com a mesma mensagem para e-mail ausente
+ou senha incorreta. Para executar o fluxo local, suba o PostgreSQL local,
+configure `CORS_ORIGINS` para permitir somente a origem local usada (por
+exemplo, `http://localhost:3000` e `http://127.0.0.1:3000`), aplique
+`flask --app wsgi db upgrade`, inicie a API conforme as instruções abaixo e,
+em outro terminal, sirva a pasta `ui` na porta 3000 com
+`python -m http.server 3000`. `api-config.js` seleciona a API local quando o
+site é aberto em localhost. Crie a conta em `/cadastro` e use o mesmo e-mail e
+senha em `/login`. O cliente mantém o JWT no `sessionStorage`
+existente por compatibilidade com o painel de mercados; isso evita persistência
+após fechar a aba, mas tokens continuam acessíveis a JavaScript da página.
 
 O login tem **dois** contadores independentes: um por IP (protege a API) e um
 por e-mail (protege uma conta específica de ataque dirigido). O e-mail vem
@@ -196,6 +239,7 @@ Detalhes de segurança:
 | Método   | Rota                          | Descrição                          |
 | -------- | ----------------------------- | ---------------------------------- |
 | POST     | `/api/v1/admin/auth/login`    | Login do admin (limite de 5/min por IP) |
+| POST     | `/api/v1/admin/auth/logout`   | Revoga o JWT do administrador autenticado |
 | GET      | `/api/v1/admin/auth/me`       | Administrador do token             |
 | GET      | `/api/v1/admin/leads`         | Listagem com filtros e paginação    |
 | GET      | `/api/v1/admin/leads/<id>`    | Detalhe do lead                    |
@@ -344,6 +388,7 @@ guardar cópia no HTML).
 | Método | Rota                                        | Auth | Sucesso | Erros        |
 | ------ | ------------------------------------------- | ---- | ------- | ------------ |
 | GET    | `/api/v1/public/establishments/<slug>`      | não  | 200     | 404, 429     |
+| GET    | `/api/v1/public/baskets`                    | não  | 200     | 400, 429     |
 | GET    | `/api/v1/public/stats`                      | não  | 200     | 400, 429     |
 
 Só responde para mercado **publicado e ativo**, e devolve `name`, `address`,
@@ -351,6 +396,23 @@ Só responde para mercado **publicado e ativo**, e devolve `name`, `address`,
 nem ids internos. Mercado inexistente, não publicado ou suspenso devolvem o
 mesmo 404 — o campo `establishment` tem exatamente 5 chaves, e há teste
 garantindo isso.
+
+### `/api/v1/public/baskets` — catálogo público
+
+Lista somente cestas ativas, com estoque e prazo de retirada futuro, vinculadas
+a mercados publicados e ativos. A resposta contém os dados públicos da oferta
+(preços em centavos, quantidade, peso, notas e janela de retirada) e nome,
+slug, bairro e horário do mercado. Não inclui IDs internos nem dados de conta.
+
+Filtros opcionais: `bairro` (validado contra a lista canônica), `q` (nome da
+cesta, mercado ou bairro), `max_price_cents`, `sort=pickup|price`, `page` e
+`limit` (padrão 24, máximo 60). A ordenação `pickup` organiza pelo fim da janela
+de retirada; distância não é calculada porque o modelo de estabelecimentos
+ainda não guarda latitude/longitude.
+
+```bash
+curl "$API/api/v1/public/baskets?bairro=Centro&q=frutas&max_price_cents=2500&sort=price"
+```
 
 ### `/api/v1/public/stats` — cestas hoje em Campinas
 
@@ -846,6 +908,7 @@ Presentes em `migrations/versions/`:
 | 004     | `004_invitations_and_establishment_onboarding.py` | tabela `invitations`; em `establishments`: `slug`, `status`, `phone`, `description`, `opening_hours`, `is_published`; `cnpj` passa a anulável |
 | 005     | `005_add_baskets.py`         | tabela `baskets` (oferta da sobra do dia)                  |
 | 006     | `006_add_establishment_bairro.py` | em `establishments`: `bairro VARCHAR(80)` anulável + índice `ix_establishments_bairro` |
+| 007     | `007_revoked_jwts.py` | lista de JWTs revogados para logout de usuários e administradores |
 
 ### Banco sem Alembic (SQL manual)
 
@@ -863,6 +926,7 @@ psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f migrations/versions/006_manual.sql
 | `004_manual.sql`| onboarding + `invitations`                            |
 | `005_manual.sql`| tabela `baskets`                                      |
 | `006_manual.sql`| `establishments.bairro` + `ix_establishments_bairro`   |
+| `007_manual.sql`| tabela `revoked_tokens` para logout com revogação         |
 
 O `006_manual.sql` **não** cria CHECK com a lista de bairros: essa lista vai
 crescer e um CHECK congelado passaria a rejeitar bairros novos. A validação fica

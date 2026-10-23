@@ -102,7 +102,9 @@ def bairro_valido(valor: str | None) -> bool:
 
 def normalizar_email(email: str | None) -> str:
     """Minúsculas e sem espaços nas pontas."""
-    return (email or "").strip().lower()
+    if not isinstance(email, str):
+        return ""
+    return email.strip().lower()
 
 
 def normalizar_texto(valor: str | None) -> str:

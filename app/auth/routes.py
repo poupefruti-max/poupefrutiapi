@@ -11,6 +11,7 @@ from sqlalchemy.exc import IntegrityError
 
 from ..extensions import db, limiter
 from ..models import User
+from services.tokens import revogar_token
 from ..validators import email_valido, normalizar_email
 
 auth_bp = Blueprint("auth", __name__, url_prefix="/api/v1/auth")
@@ -34,7 +35,7 @@ def _chave_por_email() -> str:
     passa, porque o e-mail vira a chave. O e-mail vem normalizado do corpo,
     então `Alvo@Test.com ` e `alvo@test.com` caem no mesmo bucket.
     """
-    dados = request.get_json(silent=True) or {}
+    dados = _payload()
     email = normalizar_email(dados.get("email"))
     return f"auth-email:{email}" if email else "auth-email:__vazio__"
 
@@ -55,18 +56,27 @@ def _chave_por_ip() -> str:
 def register():
     data = _payload()
 
-    email = normalizar_email(data.get("email"))
-    password = data.get("password") or ""
-    name = (data.get("name") or "").strip() or None
+    email_value = data.get("email")
+    email = normalizar_email(email_value)
+    password = data.get("password")
+    name_value = data.get("name")
+    name = name_value.strip() if isinstance(name_value, str) else ""
     min_len = current_app.config["MIN_PASSWORD_LENGTH"]
 
-    if not email_valido(email):
+    if not email_valido(email) or len(email) > 255:
         return _erro("invalid_email", "Informe um e-mail válido.", 400)
 
-    if not isinstance(password, str) or len(password) < min_len:
+    if not name or len(name) > 120:
+        return _erro("invalid_name", "Informe seu nome (até 120 caracteres).", 400)
+
+    if (
+        not isinstance(password, str)
+        or len(password) < min_len
+        or len(password.encode("utf-8")) > 72
+    ):
         return _erro(
             "weak_password",
-            f"A senha deve ter ao menos {min_len} caracteres.",
+            f"A senha deve ter ao menos {min_len} caracteres e no máximo 72 bytes.",
             400,
         )
 
@@ -116,10 +126,13 @@ def login():
     data = _payload()
 
     email = normalizar_email(data.get("email"))
-    password = data.get("password") or ""
+    password = data.get("password")
 
-    if not email or not password:
+    if not email or not isinstance(password, str) or not password:
         return _erro("missing_credentials", "Informe e-mail e senha.", 400)
+
+    if len(password.encode("utf-8")) > 72:
+        return _erro("invalid_credentials", "E-mail ou senha inválidos.", 401)
 
     user = User.query.filter_by(email=email).first()
 
@@ -130,6 +143,21 @@ def login():
     token = create_access_token(identity=str(user.id))
 
     return jsonify({"access_token": token, "user": user.to_dict()}), 200
+
+
+# ---------------------------------------------------------------------------
+# POST /api/v1/auth/logout
+# ---------------------------------------------------------------------------
+@auth_bp.post("/logout")
+@jwt_required()
+def logout():
+    try:
+        revogar_token(get_jwt())
+    except Exception:
+        db.session.rollback()
+        current_app.logger.exception("Erro ao encerrar sessão de usuário")
+        return _erro("logout_failed", "Não foi possível encerrar a sessão.", 500)
+    return jsonify({"message": "Sessão encerrada."}), 200
 
 
 # ---------------------------------------------------------------------------

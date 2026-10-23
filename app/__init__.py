@@ -167,6 +167,13 @@ def _register_blueprints(app: Flask) -> None:
 def _register_jwt_handlers(app: Flask) -> None:
     """Deixa os erros do Flask-JWT-Extended no mesmo formato JSON da API."""
 
+    from .models import RevokedToken
+
+    @jwt.token_in_blocklist_loader
+    def token_revogado(_header: dict, payload: dict) -> bool:
+        jti = payload.get("jti")
+        return bool(jti and db.session.get(RevokedToken, jti) is not None)
+
     @jwt.unauthorized_loader
     def missing_token(reason: str):
         return jsonify({"error": {"code": "authorization_required", "message": reason}}), 401
@@ -297,8 +304,11 @@ def _register_cli_commands(app: Flask) -> None:
             sys.exit(1)
 
         min_len = app.config["MIN_PASSWORD_LENGTH"]
-        if len(password) < min_len:
-            print(f"A senha deve ter ao menos {min_len} caracteres.", file=sys.stderr)
+        if len(password) < min_len or len(password.encode("utf-8")) > 72:
+            print(
+                f"A senha deve ter ao menos {min_len} caracteres e no máximo 72 bytes.",
+                file=sys.stderr,
+            )
             sys.exit(1)
 
         name = input("Nome (opcional): ").strip() or None
@@ -321,3 +331,16 @@ def _register_cli_commands(app: Flask) -> None:
                 db.session.rollback()
                 print(f"Erro ao criar admin: {e}", file=sys.stderr)
                 sys.exit(1)
+
+    @app.cli.command("purge-revoked-tokens")
+    def purge_revoked_tokens():
+        """Remove revogações de JWTs que já expiraram."""
+        from .models import RevokedToken
+        from .timeutils import agora_utc
+
+        with app.app_context():
+            removidos = RevokedToken.query.filter(
+                RevokedToken.expires_at <= agora_utc()
+            ).delete(synchronize_session=False)
+            db.session.commit()
+            print(f"Registros de tokens expirados removidos: {removidos}")

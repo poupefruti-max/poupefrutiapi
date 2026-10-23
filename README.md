@@ -786,6 +786,11 @@ No Neon, use a connection string **com `-pooler`** e mantenha
 `SQLALCHEMY_ENGINE_OPTIONS = {"pool_pre_ping": True, "pool_recycle": 300}`, já
 configurado em `app/config.py`.
 
+Em `production`, o `DATABASE_URL` é normalizado automaticamente: o driver `psycopg`
+é adicionado (`postgresql+psycopg://`) e `sslmode=require` é forçado na query string.
+URLs fora desse formato — ou sem `psycopg`, ou sem `sslmode` — são corrigidas em tempo
+de inicialização, antes de qualquer conexão.
+
 ## Instalação
 
 ```bash

@@ -31,7 +31,7 @@ def _coluna_existe(tabela: str, coluna: str) -> bool:
     daria "syntax error at or near ':'".
     """
     bind = op.get_bind()
-    return (
+    return bool(
         bind.execute(
             sa.text(
                 "SELECT 1 FROM information_schema.columns "
@@ -46,12 +46,10 @@ def _coluna_existe(tabela: str, coluna: str) -> bool:
 def _indice_existe(nome: str) -> bool:
     """True se o índice já existe (bases aplicadas à mão podem já tê-lo)."""
     bind = op.get_bind()
-    return (
+    return bool(
         bind.execute(
-            sa.text("SELECT 1 FROM pg_indexes WHERE indexname = :n"),
-            {"n": nome},
-        ).first()
-        is not None
+            sa.text("SELECT 1 FROM pg_indexes WHERE indexname = :n"), {"n": nome}
+        ).scalar()
     )
 
 

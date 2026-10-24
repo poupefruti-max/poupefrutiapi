@@ -910,6 +910,33 @@ Presentes em `migrations/versions/`:
 | 006     | `006_add_establishment_bairro.py` | em `establishments`: `bairro VARCHAR(80)` anulável + índice `ix_establishments_bairro` |
 | 007     | `007_revoked_jwts.py` | lista de JWTs revogados para logout de usuários e administradores |
 
+### Conferir revisão Alembic no Render (somente leitura)
+
+Depois de publicar o commit da API, abra o serviço Web da API no Render e use
+**Shell** para executar:
+
+```bash
+flask --app wsgi db heads
+flask --app wsgi db current
+```
+
+`heads` mostra a revisão esperada pelo código publicado; `current` consulta a
+revisão registrada no banco configurado no serviço. Para esta versão, o head
+esperado é `007`. Esses comandos não alteram o banco. Não execute `db upgrade`
+durante esta verificação. Não rode `env`, `printenv`, `echo $DATABASE_URL` nem
+copie configurações/URLs do serviço para logs ou mensagens: o comando `current`
+usa a conexão configurada no Render sem precisar imprimir credenciais.
+
+Se `current` mostrar uma revisão anterior a `007`, isso explica o 500 possível
+para JWT válido: o callback de blocklist consulta `revoked_tokens` em cada rota
+autenticada, e a tabela é criada pela revisão 007. Nesse caso, registre o
+resultado da revisão (sem a URL do banco) e planeje a aplicação da migration
+com backup e autorização operacional. Se a revisão já for `007`, investigue os
+logs do serviço para a exceção da requisição antes de repetir qualquer mudança
+no banco. Se `current` falhar ou não houver `alembic_version`, pare e confirme
+o histórico de implantação: só use os scripts `*_manual.sql` quando a base foi
+gerenciada sem Alembic e a situação estiver identificada.
+
 ### Banco sem Alembic (SQL manual)
 
 Cada migração com efeito estrutural tem um `NNN_manual.sql` ao lado, para banco

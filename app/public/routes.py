@@ -17,7 +17,7 @@ devolve.
 """
 
 from flask import Blueprint, jsonify, request
-from sqlalchemy import case, func
+from sqlalchemy import case, func, or_
 
 from ..extensions import db, limiter
 from ..models import Basket, Establishment
@@ -57,6 +57,95 @@ def _cestas_contaveis():
         Basket.quantity > 0,
         Basket.pickup_ends_at > func.now(),
     )
+
+
+@public_bp.get("/baskets")
+@limiter.limit("60 per minute")
+def listar_cestas():
+    """Catálogo público de cestas disponíveis, opcionalmente por bairro.
+
+    Os estabelecimentos ainda não armazenam coordenadas, portanto a resposta
+    não fornece nem simula distância. A página pode filtrar por bairro enquanto
+    a geolocalização de mercados não fizer parte do cadastro.
+    """
+    bairro_pedido = (request.args.get("bairro") or "").strip()
+    bairro = None
+    if bairro_pedido:
+        bairro = bairro_canonico(bairro_pedido)
+        if bairro is None:
+            return _erro(
+                "invalid_bairro",
+                "Bairro inválido. Escolha um bairro cadastrado em Campinas.",
+                400,
+            )
+
+    try:
+        pagina = max(1, int(request.args.get("page", "1")))
+        limite = min(60, max(1, int(request.args.get("limit", "24"))))
+    except (TypeError, ValueError):
+        return _erro("invalid_pagination", "Página ou limite inválido.", 400)
+
+    consulta = (
+        db.session.query(Basket, Establishment)
+        .join(Establishment, Establishment.id == Basket.establishment_id)
+        .filter(*MERCADO_PUBLICO, *_cestas_contaveis())
+    )
+    if bairro:
+        consulta = consulta.filter(Establishment.bairro == bairro)
+
+    texto = (request.args.get("q") or "").strip()[:80]
+    if texto:
+        termo = f"%{texto}%"
+        consulta = consulta.filter(or_(
+            Basket.name.ilike(termo),
+            Establishment.name.ilike(termo),
+            Establishment.bairro.ilike(termo),
+        ))
+
+    preco_maximo = request.args.get("max_price_cents")
+    if preco_maximo not in (None, ""):
+        try:
+            preco_maximo = int(preco_maximo)
+            if preco_maximo < 100:
+                raise ValueError
+        except (TypeError, ValueError):
+            return _erro("invalid_price", "Informe um preço máximo válido em centavos.", 400)
+        consulta = consulta.filter(Basket.price_cents <= preco_maximo)
+
+    ordenacao = (request.args.get("sort") or "pickup").strip().lower()
+    if ordenacao not in {"pickup", "price"}:
+        return _erro("invalid_sort", "Ordenação inválida.", 400)
+
+    total = consulta.count()
+    ordenada = (
+        consulta.order_by(Basket.price_cents.asc(), Basket.pickup_ends_at.asc())
+        if ordenacao == "price"
+        else consulta.order_by(Basket.pickup_ends_at.asc(), Basket.price_cents.asc())
+    )
+    linhas = (
+        ordenada
+        .offset((pagina - 1) * limite)
+        .limit(limite)
+        .all()
+    )
+    return jsonify({
+        "baskets": [
+            {
+                **basket.to_dict_publico(),
+                "establishment": {
+                    "name": establishment.name,
+                    "slug": establishment.slug,
+                    "bairro": establishment.bairro,
+                    "opening_hours": establishment.opening_hours,
+                },
+            }
+            for basket, establishment in linhas
+        ],
+        "page": pagina,
+        "limit": limite,
+        "total": total,
+        "pages": (total + limite - 1) // limite,
+    }), 200
 
 
 @public_bp.get("/establishments/<slug>")

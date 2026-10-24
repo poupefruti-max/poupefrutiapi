@@ -24,7 +24,12 @@ depends_on = None
 
 
 def _coluna_existe(tabela: str, coluna: str) -> bool:
-    """True se a coluna já existe no banco (permite rodar em bases divergentes)."""
+    """True se a coluna já existe no banco (permite rodar em bases divergentes).
+
+    Usa `sa.text()` + `bind.execute(...)`: `exec_driver_sql()` manda a string
+    crua ao driver, e o psycopg não entende placeholders no estilo `:nome` —
+    daria "syntax error at or near ':'".
+    """
     bind = op.get_bind()
     return bool(
         bind.execute(
@@ -33,7 +38,8 @@ def _coluna_existe(tabela: str, coluna: str) -> bool:
                 "WHERE table_name = :t AND column_name = :c"
             ),
             {"t": tabela, "c": coluna},
-        ).scalar()
+        ).first()
+        is not None
     )
 
 

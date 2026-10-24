@@ -646,3 +646,102 @@ class TestLeadRoutes:
             user = db.session.query(User).filter_by(email="joao@test.com").first()
             assert user is not None
             assert user.lead_id == lead_id
+
+    def test_commit_exception_cliente_returns_standard_500(self, app, monkeypatch):
+        """db.session.commit levantando Exception em POST /api/leads/cliente vira 500 padronizado."""
+        from sqlalchemy.orm import Session
+
+        def commit_quebrado(self):
+            raise Exception("boom")
+
+        monkeypatch.setattr(Session, "commit", commit_quebrado)
+
+        client = app.test_client()
+        response = client.post("/api/leads/cliente", json={
+            "tipo": "cliente",
+            "nome": "Teste",
+            "whatsapp": "(11) 99999-9999",
+            "email": "boom@exemplo.com",
+            "bairro": "Centro",
+            "cesta": "frutas",
+        })
+
+        assert response.status_code == 500
+        assert response.get_json() == {
+            "error": {"code": "internal_error", "message": "Erro interno no servidor."}
+        }
+
+    def test_integrity_error_without_existing_lead_returns_standard_500(self, app, monkeypatch):
+        """IntegrityError no commit sem lead existente correspondente vira 500 padronizado."""
+        from sqlalchemy.exc import IntegrityError
+        from sqlalchemy.orm import Session
+
+        def commit_integrity_error(self):
+            raise IntegrityError("INSERT", {}, Exception("duplicate key"))
+
+        monkeypatch.setattr(Session, "commit", commit_integrity_error)
+
+        client = app.test_client()
+        response = client.post("/api/leads/cliente", json={
+            "tipo": "cliente",
+            "nome": "Teste",
+            "whatsapp": "(11) 99999-9999",
+            "email": "integrity@exemplo.com",
+            "bairro": "Centro",
+            "cesta": "frutas",
+        })
+
+        assert response.status_code == 500
+        assert response.get_json() == {
+            "error": {"code": "internal_error", "message": "Erro interno no servidor."}
+        }
+
+    def test_convert_commit_exception_returns_standard_500(self, app, monkeypatch):
+        """db.session.commit quebrado em POST /api/leads/<id>/convert vira 500 padronizado."""
+        from sqlalchemy.orm import Session
+
+        client = app.test_client()
+
+        # Cria um lead válido (commit não está mockado ainda)
+        resp = client.post("/api/leads/cliente", json={
+            "tipo": "cliente",
+            "nome": "João",
+            "whatsapp": "(19) 99999-0000",
+            "email": "joao@exemplo.com",
+            "bairro": "Centro",
+            "cesta": "frutas",
+        })
+        assert resp.status_code == 201
+        lead_id = resp.get_json()["lead"]["id"]
+
+        # Cria admin e obtém token
+        with app.app_context():
+            from app.models import AdminUser
+            admin = AdminUser(email="admin@exemplo.com", name="Admin")
+            admin.set_password("senha123")
+            db.session.add(admin)
+            db.session.commit()
+
+        resp = client.post("/api/v1/admin/auth/login", json={
+            "email": "admin@exemplo.com",
+            "password": "senha123",
+        })
+        assert resp.status_code == 200
+        token = resp.get_json()["access_token"]
+
+        # Mocka commit para levantar Exception
+        def commit_quebrado(self):
+            raise Exception("boom")
+
+        monkeypatch.setattr(Session, "commit", commit_quebrado)
+
+        resp = client.post(
+            f"/api/leads/{lead_id}/convert",
+            json={"password": "senha123"},
+            headers={"Authorization": f"Bearer {token}"},
+        )
+
+        assert resp.status_code == 500
+        assert resp.get_json() == {
+            "error": {"code": "internal_error", "message": "Erro interno no servidor."}
+        }

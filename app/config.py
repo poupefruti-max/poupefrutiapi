@@ -1,6 +1,7 @@
 """Configuração da aplicação, lida de variáveis de ambiente."""
 
 import os
+from urllib.parse import parse_qs, urlencode, urlunparse, urlparse
 
 from dotenv import load_dotenv
 
@@ -19,6 +20,31 @@ def _as_int(value: str | None, default: int) -> int:
         return int(str(value).strip())
     except (TypeError, ValueError):
         return default
+
+
+def _normalize_database_url(url: str | None) -> str | None:
+    """Garante driver psycopg e sslmode=require na URL de produção.
+
+    Não toca em URLs que não sejam PostgreSQL (ex: sqlite), para que o
+    TestingConfig continue funcionando com ``sqlite:///:memory:``.
+    """
+    if not url or not url.startswith("postgresql"):
+        return url
+
+    parsed = urlparse(url)
+    scheme = parsed.scheme
+    if scheme == "postgresql":
+        scheme = "postgresql+psycopg"
+
+    params = parse_qs(parsed.query, keep_blank_values=True)
+    params["sslmode"] = ["require"]
+
+    return urlunparse(
+        parsed._replace(
+            scheme=scheme,
+            query=urlencode(params, doseq=True),
+        )
+    )
 
 
 class Config:
@@ -79,6 +105,7 @@ class ProductionConfig(Config):
     DEBUG = False
 
     def __init__(self) -> None:
+        self.SQLALCHEMY_DATABASE_URI = _normalize_database_url(self.SQLALCHEMY_DATABASE_URI)
         if self.SECRET_KEY.startswith("dev-"):
             raise RuntimeError("Defina SECRET_KEY antes de rodar em produção.")
         if self.JWT_SECRET_KEY.startswith("dev-"):
@@ -115,4 +142,5 @@ CONFIG_MAP = {
 
 
 def get_config(name: str | None = None):
-    return CONFIG_MAP.get(name or os.getenv("FLASK_ENV", "default"))
+    config_class = CONFIG_MAP.get(name or os.getenv("FLASK_ENV", "default"))
+    return config_class()

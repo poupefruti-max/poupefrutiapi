@@ -154,6 +154,19 @@ class AdminUser(db.Model):
         return f"<AdminUser {self.email}>"
 
 
+class RevokedToken(db.Model):
+    """JTI de JWT revogado até o instante de expiração do próprio token."""
+
+    __tablename__ = "revoked_tokens"
+
+    jti = db.Column(db.String(36), primary_key=True)
+    token_type = db.Column(db.String(16), nullable=False)
+    expires_at = db.Column(DateTime(timezone=True), nullable=False, index=True)
+    revoked_at = db.Column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+
 class Lead(db.Model):
     __tablename__ = "leads"
 

@@ -175,12 +175,31 @@ def _register_jwt_handlers(app: Flask) -> None:
         return bool(jti and db.session.get(RevokedToken, jti) is not None)
 
     @jwt.unauthorized_loader
-    def missing_token(reason: str):
-        return jsonify({"error": {"code": "authorization_required", "message": reason}}), 401
+    def missing_token(_reason: str):
+        return jsonify({
+            "error": {
+                "code": "authorization_required",
+                "message": "Autenticação necessária.",
+            }
+        }), 401
 
     @jwt.invalid_token_loader
-    def invalid_token(reason: str):
-        return jsonify({"error": {"code": "invalid_token", "message": reason}}), 401
+    def invalid_token(_reason: str):
+        return jsonify({
+            "error": {
+                "code": "invalid_token",
+                "message": "Token inválido. Faça login novamente.",
+            }
+        }), 401
+
+    @jwt.revoked_token_loader
+    def revoked_token(_header: dict, _payload: dict):
+        return jsonify({
+            "error": {
+                "code": "revoked_token",
+                "message": "Sessão encerrada. Entre novamente.",
+            }
+        }), 401
 
     @jwt.expired_token_loader
     def expired_token(_header: dict, _payload: dict):

@@ -65,6 +65,30 @@ class TestNormalizeDatabaseUrl:
         assert _normalize_database_url(url) == expected
 
 
+class TestCorsOrigins:
+    def test_cors_origin_normalization_removes_trailing_slash_and_quotes(self):
+        from app.config import _parse_cors_origins
+
+        assert _parse_cors_origins(
+            " 'https://poupefruti.vercel.app/', https://admin.example.com/ "
+        ) == [
+            "https://poupefruti.vercel.app",
+            "https://admin.example.com",
+        ]
+
+    def test_cors_origin_parser_rejects_wildcards_and_non_origin_urls(self):
+        from app.config import _parse_cors_origins
+
+        assert _parse_cors_origins(
+            "*,https://poupefruti.vercel.app/path,ftp://example.com,https://ok.example"
+        ) == ["https://ok.example"]
+
+    def test_cors_origin_empty_value_uses_restricted_production_default(self):
+        from app.config import _parse_cors_origins
+
+        assert _parse_cors_origins(" ") == ["https://poupefruti.vercel.app"]
+
+
 class TestGetConfigReturnsInstances:
     """Problem A: get_config() deve retornar instâncias, não classes."""
 

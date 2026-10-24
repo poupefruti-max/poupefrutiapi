@@ -1,7 +1,7 @@
 """Configuração da aplicação, lida de variáveis de ambiente."""
 
 import os
-from urllib.parse import parse_qs, urlencode, urlunparse, urlparse
+from urllib.parse import parse_qs, urlencode, urlsplit, urlunparse, urlparse
 
 from dotenv import load_dotenv
 
@@ -20,6 +20,37 @@ def _as_int(value: str | None, default: int) -> int:
         return int(str(value).strip())
     except (TypeError, ValueError):
         return default
+
+
+def _parse_cors_origins(value: str | None) -> list[str]:
+    """Normaliza uma allowlist CORS sem aceitar curingas ou URLs com paths."""
+    raw = value if value and value.strip() else "https://poupefruti.vercel.app"
+    origins = []
+    for item in raw.split(","):
+        candidate = item.strip().strip("\"'").strip()
+        if not candidate or candidate == "*":
+            continue
+        try:
+            parsed = urlsplit(candidate)
+            # A origem não contém caminho, query, fragmento nem credenciais.
+            if (
+                parsed.scheme.lower() not in {"http", "https"}
+                or not parsed.hostname
+                or parsed.username is not None
+                or parsed.password is not None
+                or parsed.path not in {"", "/"}
+                or parsed.query
+                or parsed.fragment
+            ):
+                continue
+            # hostname pode ser None/invalid e .port pode lançar ValueError.
+            _ = parsed.port
+        except ValueError:
+            continue
+        origin = f"{parsed.scheme.lower()}://{parsed.netloc.lower()}"
+        if origin not in origins:
+            origins.append(origin)
+    return origins
 
 
 def _normalize_database_url(url: str | None) -> str | None:
@@ -61,11 +92,7 @@ class Config:
 
     # --- CORS -------------------------------------------------------------
     # Lista separada por vírgulas, ex.: "http://localhost:3000,https://app.exemplo.com"
-    CORS_ORIGINS = [
-        origin.strip()
-        for origin in os.getenv("CORS_ORIGINS", "https://poupefruti.vercel.app").split(",")
-        if origin.strip()
-    ]
+    CORS_ORIGINS = _parse_cors_origins(os.getenv("CORS_ORIGINS"))
 
     # --- JWT --------------------------------------------------------------
     JWT_ACCESS_TOKEN_EXPIRES = int(os.getenv("JWT_ACCESS_TOKEN_EXPIRES", 60 * 60))  # 1h

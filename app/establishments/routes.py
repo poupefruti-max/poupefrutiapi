@@ -5,6 +5,7 @@ consultada no banco a cada requisição.
 """
 
 from flask import Blueprint, current_app, g, jsonify, request
+from flask_jwt_extended import jwt_required
 from ..extensions import db
 from ..models import Establishment
 from ..rbac import (
@@ -82,6 +83,7 @@ def _perfil_publico(est: Establishment) -> dict:
 # GET /api/v1/establishments/<id>/profile
 # ---------------------------------------------------------------------------
 @establishments_bp.get("/<int:establishment_id>/profile")
+@jwt_required()
 @establishment_role_required("ver_perfil")
 def ver_perfil(establishment_id: int):
     dados = _perfil_publico(g.establishment)
@@ -96,6 +98,7 @@ def ver_perfil(establishment_id: int):
 # PATCH /api/v1/establishments/<id>/profile
 # ---------------------------------------------------------------------------
 @establishments_bp.patch("/<int:establishment_id>/profile")
+@jwt_required()
 @establishment_role_required("editar_perfil")
 def editar_perfil(establishment_id: int):
     """Atualiza os dados do próprio estabelecimento."""
@@ -171,6 +174,7 @@ def editar_perfil(establishment_id: int):
 # POST /api/v1/establishments/<id>/publish
 # ---------------------------------------------------------------------------
 @establishments_bp.post("/<int:establishment_id>/publish")
+@jwt_required()
 @establishment_role_required("publicar")
 def publicar(establishment_id: int):
     """Publica a página do mercado.
@@ -211,6 +215,7 @@ def publicar(establishment_id: int):
 # POST /api/v1/establishments/<id>/unpublish
 # ---------------------------------------------------------------------------
 @establishments_bp.post("/<int:establishment_id>/unpublish")
+@jwt_required()
 @establishment_role_required("publicar")
 def despublicar(establishment_id: int):
     """Tira o mercado da página pública, sem alterar o status."""
